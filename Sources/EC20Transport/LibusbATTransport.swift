@@ -19,6 +19,7 @@ public final class LibusbATTransport: ATTransport, @unchecked Sendable {
     private var readThread: Thread? = nil
     private var incomingHandler: (@Sendable (String) -> Void)? = nil
     private let lock = NSLock()
+    private let transferGroup = DispatchGroup()
     
     public init() {}
     
@@ -78,7 +79,11 @@ public final class LibusbATTransport: ATTransport, @unchecked Sendable {
         }
         self.isRunning = false
         self.isConnected = false
-        
+
+        lock.unlock()
+        // Both endpoints share the handle. Let in-flight timed transfers exit first.
+        transferGroup.wait()
+        lock.lock()
         let handle = self.deviceHandle
         let ctx = self.usbContext
         self.deviceHandle = nil
@@ -99,24 +104,29 @@ public final class LibusbATTransport: ATTransport, @unchecked Sendable {
         defer { lock.unlock() }
         return deviceHandle
     }
-    
-    public func send(raw: String) async throws {
+
+    private func beginWrite() throws -> SafeDevicePointer {
+        lock.lock()
+        defer { lock.unlock() }
         guard isConnected, let handle = deviceHandle else {
             throw NSError(domain: "LibusbATTransport", code: -2, userInfo: [NSLocalizedDescriptionKey: "Transport not connected"])
         }
-        
-        let safeHandle = SafeDevicePointer(handle)
+        transferGroup.enter()
+        return SafeDevicePointer(handle)
+    }
+    public func send(raw: String) async throws {
+        let safeHandle = try beginWrite()
         let data = Array(raw.utf8)
         
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self = self else { return }
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                defer { transferGroup.leave() }
                 var transferred: Int32 = 0
                 var buffer = data
                 let res = buffer.withUnsafeMutableBufferPointer { ptr in
                     libusb_bulk_transfer(safeHandle.pointer, self.epOut, ptr.baseAddress, Int32(ptr.count), &transferred, 2000)
                 }
-                if res == 0 {
+                if res == 0 && transferred == Int32(buffer.count) {
                     continuation.resume()
                 } else {
                     continuation.resume(throwing: NSError(
@@ -130,12 +140,18 @@ public final class LibusbATTransport: ATTransport, @unchecked Sendable {
     }
     
     private func startReadLoop() {
+        transferGroup.enter()
+        let group = transferGroup
         let thread = Thread { [weak self] in
+            defer { group.leave() }
             guard let self = self else { return }
             var incomingBuffer = Data()
             
-            while self.isRunning {
-                guard let handle = self.deviceHandle else { break }
+            while true {
+                self.lock.lock()
+                let handle = self.isRunning ? self.deviceHandle : nil
+                self.lock.unlock()
+                guard let handle else { break }
                 var buffer = [UInt8](repeating: 0, count: 2048)
                 var transferred: Int32 = 0
                 

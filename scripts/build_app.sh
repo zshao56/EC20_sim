@@ -9,7 +9,7 @@ echo "==> Building EC20Companion in release mode..."
 cd "${ROOT_DIR}"
 swift build -c release --product EC20App
 
-APP_NAME="EC20Companion.app"
+APP_NAME="${EC20_APP_NAME:-EC20Companion.app}"
 APP_DIR="${ROOT_DIR}/${APP_NAME}"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
@@ -58,4 +58,4 @@ EOF
 echo "==> Ad-hoc signing ${APP_DIR}..."
 codesign --force --deep --sign - "${APP_DIR}"
 
-echo "==> EC20Companion.app created successfully at ${APP_DIR}"
+echo "==> ${APP_NAME} created successfully at ${APP_DIR}"

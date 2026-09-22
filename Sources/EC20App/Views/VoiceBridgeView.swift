@@ -68,7 +68,12 @@ public struct VoiceBridgeView: View {
                     HStack(spacing: 12) {
                         Button(action: {
                             Task {
-                                _ = try? await controller.executeAT("AT+QPCMV=1,0")
+                                guard controller.audioAssessment.qpcmvSupported,
+                                      let response = try? await controller.executeAT("AT+QPCMV=1,0"),
+                                      response.isOK else {
+                                    controller.setAudioBridgeStatus("QPCMV activation failed")
+                                    return
+                                }
                                 audioBridge.start(deviceHandle: controller.transport.rawDeviceHandle, loopbackOnly: false)
                                 controller.setAudioBridgeStatus(audioBridge.state.rawValue)
                             }

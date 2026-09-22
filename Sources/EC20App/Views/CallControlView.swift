@@ -20,10 +20,10 @@ public struct CallControlView: View {
                         .foregroundColor(.orange)
                         .font(.title3)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Important Capability Distinction: Call Signaling vs Audio Bridge")
+                        Text("Call and Audio Status")
                             .font(.headline)
                             .foregroundColor(.primary)
-                        Text("• Call Control (ATD / ATA / ATH / CLCC / CLIP): Fully implemented and operational over USB Interface 2 (AT port).\n• Voice Audio Stream (Microphone / Speaker): NOT yet bridged to macOS system audio. The EC20 module exposes raw PCM on USB Interface 1 via AT+QPCMV=1,0, but does not present a standard USB Audio Class (UAC) sound device to macOS. Full voice requires a userspace CoreAudio PCM bridge.")
+                        Text("Call commands use USB Interface 2. The app includes a CoreAudio ↔ USB Interface 1 PCM bridge. A local loopback check is available under Voice Audio Bridge; two-way carrier audio still needs a live test call.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }

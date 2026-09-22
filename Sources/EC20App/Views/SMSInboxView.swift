@@ -138,12 +138,6 @@ public struct SMSInboxView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        if let pdu = msg.rawPDU {
-                            Text("Raw PDU: \(pdu)")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
                     }
                     .padding(10)
                     .background(Color(NSColor.controlBackgroundColor))

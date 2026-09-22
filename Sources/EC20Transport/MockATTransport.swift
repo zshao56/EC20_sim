@@ -9,6 +9,7 @@ public final class MockATTransport: ATTransport, @unchecked Sendable {
     private let lock = NSLock()
     
     private var isAwaitingSMSData: Bool = false
+    public private(set) var lastSMSPayloadHadCRLF = false
     private var activeCalls: [String] = []
     
     public init() {}
@@ -41,6 +42,7 @@ public final class MockATTransport: ATTransport, @unchecked Sendable {
         // Handle SMS prompt input
         if isAwaitingSMSData {
             if raw.contains("\u{1A}") || raw.contains("\u{1B}") {
+                lastSMSPayloadHadCRLF = raw.hasSuffix("\r\n")
                 isAwaitingSMSData = false
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 incomingHandler?("+CMGS: 42")
@@ -93,11 +95,8 @@ public final class MockATTransport: ATTransport, @unchecked Sendable {
             incomingHandler?("+CPMS: 2,255,2,255,2,255")
             incomingHandler?("OK")
         } else if trimmed.hasPrefix("AT+CMGL=") {
-            // Return simulated messages
-            incomingHandler?("+CMGL: 1,\"REC READ\",\"10010\",,\"2026/09/22,20:00:00+32\"")
-            incomingHandler?("Welcome to China Unicom 4G Network.")
-            incomingHandler?("+CMGL: 2,\"REC READ\",\"10658999\",,\"2026/09/22,20:15:00+32\"")
-            incomingHandler?("Verification code: 849201. Valid for 10 minutes.")
+            incomingHandler?("+CMGL: 1,1,,35")
+            incomingHandler?("0891683108200005F0040D91683108000000F000006290220202022304D4F29C0E")
             incomingHandler?("OK")
         } else if trimmed.hasPrefix("AT+CMGS=") {
             isAwaitingSMSData = true

@@ -66,7 +66,7 @@ struct EC20CLIMain {
         print("\n[5/5] Technical Assessment Conclusion:")
         print(audioAssessment.technicalConclusion)
         
-        controller.disconnect()
+        await controller.disconnect()
         print("\n[Done] Diagnostic run completed successfully.")
     }
 }

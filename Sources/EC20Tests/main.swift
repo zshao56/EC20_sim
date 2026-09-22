@@ -92,12 +92,12 @@ struct TestSuiteRunner {
         // 5. Audio Bridge Assessment Tests
         print("\n[Suite 5] Audio Bridge Assessment & Hardware Logic Tests")
         let pcmTransport = VoicePCMTransport()
-        let assessment = pcmTransport.probeAudioCapabilities(currentQPCMV: "0,0", qdai: "3,0,0,4,0,0,1,1")
+        let assessment = pcmTransport.probeAudioCapabilities(currentQPCMV: "0,0", qdai: "3,0,0,4,0,0,1,1", querySupported: true)
         assertTest(assessment.uacDeviceDetected == false, "UAC Audio Class is absent in standard 2c7c:0125 descriptor")
         assertTest(assessment.qpcmvSupported == true, "Voice over USB (AT+QPCMV) is supported")
         assertTest(assessment.pcmInterfaceIndex == 1, "Voice over USB routes to Interface 1 (GNSS/NMEA)")
-        assertTest(assessment.callSignalingStatus.contains("Operational"), "Call signaling is distinct and operational")
-        assertTest(assessment.systemAudioBridgeStatus.contains("No Direct CoreAudio"), "Accurately reports absence of macOS CoreAudio bridge")
+        assertTest(assessment.callSignalingStatus.contains("unverified"), "Live call remains unverified")
+        assertTest(assessment.systemAudioBridgeStatus.contains("unverified"), "Live carrier audio remains unverified")
         
         // 6. Mock Controller Integration & Call State Flow Tests
         print("\n[Suite 6] Mock Controller Integration & Call Flow Tests")
@@ -114,6 +114,13 @@ struct TestSuiteRunner {
         assertTest(simInfo.cpinStatus == .ready, "Mock initialization retrieved CPIN READY")
         assertTest(simInfo.operatorName == "CHN-UNICOM", "Mock initialization retrieved CHN-UNICOM operator (got '\(simInfo.operatorName ?? "nil")')")
         assertTest(simInfo.signal.csq == 25, "Mock initialization retrieved CSQ 25")
+
+        await controller.loadSMSMessages()
+        assertTest(controller.smsMessages.first?.text == "Test", "PDU inbox decodes message body")
+        assertTest(controller.smsMessages.first?.senderOrRecipient == "+8613800000000", "PDU inbox decodes sender")
+        try? await controller.sendSMS(to: "+8613800138000", text: "Offline test")
+        assertTest(!mock.lastSMSPayloadHadCRLF, "SMS PDU ends at Ctrl-Z without extra CRLF")
+        assertTest(!controller.atLogs.joined().contains("Offline test"), "SMS body is absent from AT logs")
         
         // Test simulated incoming call
         mock.simulateIncomingCall(number: "13912345678")
@@ -131,7 +138,7 @@ struct TestSuiteRunner {
         let callsAfterHangup = controller.activeCalls
         assertTest(callsAfterHangup.isEmpty, "Call terminated after hangup")
         
-        controller.disconnect()
+        await controller.disconnect()
         
         // Summary
         print("\n=======================================================")

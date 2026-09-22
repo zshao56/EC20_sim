@@ -97,8 +97,11 @@ public final class EC20Controller: ObservableObject {
         }
     }
     
-    public func disconnect() {
+    public func disconnect() async {
         stopTimers()
+        if case .connected = connectionStatus {
+            await onCallEnded?()
+        }
         urcTask?.cancel()
         urcTask = nil
         transport.close()
@@ -109,17 +112,28 @@ public final class EC20Controller: ObservableObject {
     // MARK: - AT Execution
     
     public func executeAT(_ raw: String, timeout: TimeInterval = 3.0) async throws -> ATResponse {
-        let maskedCmd = SensitiveMasker.sanitizeLog(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        let isSMSPayload = raw.hasSuffix("\u{1A}")
+        let isSMSRead = raw.hasPrefix("AT+CMGL") || raw.hasPrefix("AT+CMGR")
+        let isPrivateQuery = ["AT+CIMI", "AT+GSN", "AT+QCCID"].contains(raw) || raw.hasPrefix("ATD")
+        let maskedCmd = isSMSPayload ? "[SMS PDU hidden]" :
+            (raw.hasPrefix("ATD") ? "ATD[phone hidden];" : SensitiveMasker.sanitizeLog(raw.trimmingCharacters(in: .whitespacesAndNewlines)))
         appendLog(">> \(maskedCmd)")
         
-        let cmd = ATCommand(raw: raw.hasSuffix("\r\n") ? raw : raw + "\r\n", timeoutSeconds: timeout)
+        let wireCommand = isSMSPayload || raw.hasSuffix("\r\n") ? raw : raw + "\r\n"
+        let cmd = ATCommand(raw: wireCommand, timeoutSeconds: timeout)
         let resp = try await serialQueue.execute(command: cmd) { [weak self] stringToSend in
-            guard let self = self else { return }
+            guard let self = self else { throw CancellationError() }
             try await self.transport.send(raw: stringToSend)
         }
         
         for line in resp.rawLines {
-            appendLog("<< \(SensitiveMasker.sanitizeLog(line))")
+            if isSMSRead || isPrivateQuery || isSMSPayload {
+                if line == "OK" || line == "ERROR" || line.hasPrefix("+CME ERROR:") || line.hasPrefix("+CMS ERROR:") {
+                    appendLog("<< \(line)")
+                }
+            } else {
+                appendLog("<< \(SensitiveMasker.sanitizeLog(line))")
+            }
         }
         return resp
     }
@@ -192,8 +206,7 @@ public final class EC20Controller: ObservableObject {
         // 8. Probe Audio Bridge capabilities (non-destructive)
         await refreshAudioAssessment()
         
-        // 9. Load SMS
-        await loadSMSMessages()
+        // Existing messages are read only on an explicit inbox refresh.
     }
     
     public func refreshRegistration() async {
@@ -265,7 +278,10 @@ public final class EC20Controller: ObservableObject {
             qpcmvSupported: isSupported,
             qpcmvCurrentSetting: qpcmv,
             qdaiSetting: qdai,
-            systemAudioBridgeStatus: audioBridgeStatus
+            systemAudioBridgeStatus: audioBridgeStatus,
+            technicalConclusion: isSupported
+                ? "AT+QPCMV reports Voice over USB support. The CoreAudio/USB PCM bridge is implemented; a live call is still needed to verify two-way audio."
+                : "AT+QPCMV support was not confirmed on this connection."
         )
     }
     
@@ -283,56 +299,82 @@ public final class EC20Controller: ObservableObject {
     // MARK: - SMS Operations
     
     public func loadSMSMessages() async {
-        // Read messages from ME (module) and SM (SIM)
-        _ = try? await executeAT("AT+CMGF=1") // Use text mode for listing or fallback
+        // PDU mode preserves UCS2 and multipart metadata.
+        guard let mode = try? await executeAT("AT+CMGF=0"), mode.isOK else { return }
+        var listed: [SMSMessage] = []
         _ = try? await executeAT("AT+CPMS=\"ME\",\"ME\",\"ME\"")
-        if let resp = try? await executeAT("AT+CMGL=\"ALL\"") {
-            parseAndStoreSMSList(resp.dataLines, storageArea: "ME")
+        if let resp = try? await executeAT("AT+CMGL=4", timeout: 10) {
+            listed += parseSMSList(resp.dataLines, storageArea: "ME")
         }
         _ = try? await executeAT("AT+CPMS=\"SM\",\"SM\",\"SM\"")
-        if let resp = try? await executeAT("AT+CMGL=\"ALL\"") {
-            parseAndStoreSMSList(resp.dataLines, storageArea: "SM")
+        if let resp = try? await executeAT("AT+CMGL=4", timeout: 10) {
+            listed += parseSMSList(resp.dataLines, storageArea: "SM")
         }
+        let locallySent = smsMessages.filter { !$0.isIncoming && $0.storageIndex == nil }
+        smsMessages = locallySent + assembleMultipartMessages(listed).sorted { $0.timestamp > $1.timestamp }
     }
     
-    private func parseAndStoreSMSList(_ lines: [String], storageArea: String) {
+    private func parseSMSList(_ lines: [String], storageArea: String) -> [SMSMessage] {
+        var messages: [SMSMessage] = []
         var index = 0
         while index < lines.count {
             let line = lines[index]
             if line.hasPrefix("+CMGL:") {
                 let header = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
                 let parts = header.components(separatedBy: ",")
-                let msgIdx = Int(parts.first ?? "0") ?? 0
-                var sender = "Unknown"
-                if parts.count >= 3 {
-                    sender = parts[2].replacingOccurrences(of: "\"", with: "")
-                }
-                
-                var body = ""
-                if index + 1 < lines.count && !lines[index + 1].hasPrefix("+CMGL:") {
-                    body = lines[index + 1]
+                if let messageIndex = Int(parts.first?.trimmingCharacters(in: .whitespaces) ?? ""),
+                   index + 1 < lines.count,
+                   let decoded = PDUCodec.decodeDeliverPDU(lines[index + 1]) {
+                    messages.append(SMSMessage(
+                        storageIndex: messageIndex,
+                        storageArea: storageArea,
+                        senderOrRecipient: decoded.sender,
+                        text: decoded.text,
+                        timestamp: decoded.timestamp ?? Date(),
+                        isIncoming: true,
+                        isRead: (Int(parts.dropFirst().first?.trimmingCharacters(in: .whitespaces) ?? "1") ?? 1) != 0,
+                        multipartInfo: decoded.multipartInfo
+                    ))
                     index += 1
-                }
-                
-                let message = SMSMessage(
-                    storageIndex: msgIdx,
-                    storageArea: storageArea,
-                    senderOrRecipient: sender,
-                    text: body,
-                    timestamp: Date(),
-                    isIncoming: true,
-                    isRead: true
-                )
-                
-                if !smsMessages.contains(where: { $0.storageIndex == msgIdx && $0.storageArea == storageArea }) {
-                    smsMessages.append(message)
                 }
             }
             index += 1
         }
+        return messages
+    }
+
+    private func assembleMultipartMessages(_ messages: [SMSMessage]) -> [SMSMessage] {
+        var result = messages.filter { $0.multipartInfo == nil }
+        var groups: [String: [SMSMessage]] = [:]
+        for message in messages {
+            guard let part = message.multipartInfo else { continue }
+            let key = "\(message.storageArea ?? "")|\(message.senderOrRecipient)|\(part.referenceNumber)|\(part.totalParts)"
+            groups[key, default: []].append(message)
+        }
+        for group in groups.values {
+            guard let first = group.first, let descriptor = first.multipartInfo else { continue }
+            let ordered = group.sorted { ($0.multipartInfo?.currentPart ?? 0) < ($1.multipartInfo?.currentPart ?? 0) }
+            let partNumbers = Set(ordered.compactMap { $0.multipartInfo?.currentPart })
+            if descriptor.totalParts > 0 && ordered.count == descriptor.totalParts && partNumbers == Set(1...descriptor.totalParts) {
+                result.append(SMSMessage(
+                    storageArea: first.storageArea,
+                    senderOrRecipient: first.senderOrRecipient,
+                    text: ordered.map(\.text).joined(),
+                    timestamp: ordered.map(\.timestamp).min() ?? first.timestamp,
+                    isIncoming: true,
+                    isRead: ordered.allSatisfy(\.isRead)
+                ))
+            } else {
+                result += ordered
+            }
+        }
+        return result
     }
     
     public func sendSMS(to destination: String, text: String) async throws {
+        guard isValidPhoneNumber(destination), !text.isEmpty else {
+            throw NSError(domain: "EC20Controller", code: -8, userInfo: [NSLocalizedDescriptionKey: "Enter a valid recipient and non-empty message"])
+        }
         appendLog("[SMS] Sending SMS to \(SensitiveMasker.mask(phoneNumber: destination))...")
         
         let pdus = PDUCodec.encodeSubmitPDUs(destination: destination, text: text)
@@ -367,12 +409,19 @@ public final class EC20Controller: ObservableObject {
     
     public func dial(number: String) async throws {
         let clean = number.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
+        guard isValidPhoneNumber(clean) else {
+            throw NSError(domain: "EC20Controller", code: -9, userInfo: [NSLocalizedDescriptionKey: "Enter a valid phone number"])
+        }
         appendLog("[Call] Dialing \(SensitiveMasker.mask(phoneNumber: clean))...")
-        
-        let resp = try await executeAT("ATD\(clean);", timeout: 10.0)
-        guard resp.isOK else {
-            throw NSError(domain: "EC20Controller", code: -5, userInfo: [NSLocalizedDescriptionKey: "Dial failed: \(resp.errorMessage ?? "Error")"])
+        await onCallStarted?()
+        do {
+            let resp = try await executeAT("ATD\(clean);", timeout: 10.0)
+            guard resp.isOK else {
+                throw NSError(domain: "EC20Controller", code: -5, userInfo: [NSLocalizedDescriptionKey: "Dial failed: \(resp.errorMessage ?? "Error")"])
+            }
+        } catch {
+            await onCallEnded?()
+            throw error
         }
         let record = CallRecord(id: 1, direction: .outgoing, status: .dialing, phoneNumber: clean, startedAt: Date())
         activeCalls = [record]
@@ -380,24 +429,37 @@ public final class EC20Controller: ObservableObject {
     
     public func answerCall() async throws {
         appendLog("[Call] Answering incoming call...")
-        let resp = try await executeAT("ATA", timeout: 5.0)
-        guard resp.isOK else {
-            throw NSError(domain: "EC20Controller", code: -6, userInfo: [NSLocalizedDescriptionKey: "Answer failed: \(resp.errorMessage ?? "Error")"])
+        await onCallStarted?()
+        do {
+            let resp = try await executeAT("ATA", timeout: 5.0)
+            guard resp.isOK else {
+                throw NSError(domain: "EC20Controller", code: -6, userInfo: [NSLocalizedDescriptionKey: "Answer failed: \(resp.errorMessage ?? "Error")"])
+            }
+        } catch {
+            await onCallEnded?()
+            throw error
         }
         incomingCallAlert = nil
         if let idx = activeCalls.firstIndex(where: { $0.status == .ringingIncoming }) {
             activeCalls[idx].status = .active
             activeCalls[idx].startedAt = Date()
-            await onCallStarted?()
         }
     }
     
     public func hangupCall() async throws {
         appendLog("[Call] Hanging up call...")
-        _ = try? await executeAT("ATH", timeout: 5.0)
+        let response = try await executeAT("ATH", timeout: 5.0)
+        guard response.isOK else {
+            throw NSError(domain: "EC20Controller", code: -10, userInfo: [NSLocalizedDescriptionKey: response.errorMessage ?? "Hangup failed"])
+        }
         incomingCallAlert = nil
         activeCalls.removeAll()
         await onCallEnded?()
+    }
+
+    private func isValidPhoneNumber(_ value: String) -> Bool {
+        let digits = value.hasPrefix("+") ? value.dropFirst() : Substring(value)
+        return (3...20).contains(digits.count) && digits.allSatisfy { $0 >= "0" && $0 <= "9" }
     }
     
     public func pollCalls() async {

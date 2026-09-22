@@ -125,7 +125,7 @@ public actor ATSerialQueue {
         let timeoutError = NSError(
             domain: "EC20SerialQueue",
             code: -1001,
-            userInfo: [NSLocalizedDescriptionKey: "AT command '\(command.raw.trimmingCharacters(in: .whitespacesAndNewlines))' timed out after \(command.timeoutSeconds)s"]
+            userInfo: [NSLocalizedDescriptionKey: "AT response timed out after \(command.timeoutSeconds)s"]
         )
         cont.resume(throwing: timeoutError)
     }

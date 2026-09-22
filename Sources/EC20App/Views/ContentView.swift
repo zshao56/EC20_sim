@@ -2,6 +2,12 @@ import SwiftUI
 import EC20Core
 import EC20Transport
 
+@MainActor
+final class AudioBridgeStore: ObservableObject {
+    let real = EC20AudioBridge()
+    let mock = EC20AudioBridge()
+}
+
 public enum NavigationSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case sms = "Messages"
@@ -28,8 +34,7 @@ public struct ContentView: View {
     @StateObject private var mockController: EC20Controller
     @StateObject private var uiState = AppUIState()
     
-    private let realAudioBridge = EC20AudioBridge()
-    private let mockAudioBridge = EC20AudioBridge()
+    @StateObject private var audioStore = AudioBridgeStore()
     
     public init() {
         let realTransport = LibusbATTransport()
@@ -43,7 +48,7 @@ public struct ContentView: View {
     }
     
     private var activeAudioBridge: EC20AudioBridge {
-        uiState.useSimulation ? mockAudioBridge : realAudioBridge
+        uiState.useSimulation ? audioStore.mock : audioStore.real
     }
     
     public var body: some View {
@@ -102,6 +107,11 @@ public struct ContentView: View {
         }
         .onChange(of: uiState.useSimulation) { _ in
             Task {
+                if uiState.useSimulation {
+                    await realController.disconnect()
+                } else {
+                    await mockController.disconnect()
+                }
                 await activeController.connect()
             }
         }
@@ -109,9 +119,15 @@ public struct ContentView: View {
     
     private func setupAudioBridgeHooks() {
         // Real modem audio bridge hooks
+        let realAudioBridge = audioStore.real
+        let mockAudioBridge = audioStore.mock
         realController.onCallStarted = { [weak realController, weak realAudioBridge] in
             guard let realController = realController, let realAudioBridge = realAudioBridge else { return }
-            _ = try? await realController.executeAT("AT+QPCMV=1,0")
+            guard realAudioBridge.state == .stopped, realController.audioAssessment.qpcmvSupported else { return }
+            guard let response = try? await realController.executeAT("AT+QPCMV=1,0"), response.isOK else {
+                realController.setAudioBridgeStatus("QPCMV activation failed")
+                return
+            }
             realAudioBridge.start(deviceHandle: realController.transport.rawDeviceHandle, loopbackOnly: false)
             realController.setAudioBridgeStatus(realAudioBridge.state.rawValue)
         }
@@ -192,7 +208,7 @@ public struct ContentView: View {
             Button(action: {
                 Task {
                     if case .connected = activeController.connectionStatus {
-                        activeController.disconnect()
+                        await activeController.disconnect()
                     } else {
                         await activeController.connect()
                     }

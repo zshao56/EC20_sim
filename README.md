@@ -29,7 +29,7 @@ On modern macOS releases, Qualcomm/Quectel cellular modems connected via USB do 
 ## 2. Requirements & Prerequisites
 
 1. **Hardware**: Apple Silicon Mac (M1/M2/M3/M4) with Quectel EC20-CE-HDLG connected via USB Type-C.
-2. **macOS**: macOS 13.0+ (Ventura, Sonoma, Sequoia).
+2. **macOS**: Built and verified on the connected Mac. The Swift package targets macOS 13; this bundle links to the locally installed Homebrew `libusb`, so copying the bundle to another Mac requires a compatible `libusb` build.
 3. **Swift**: Swift 6.4 (Command Line Tools or Xcode).
 4. **libusb**: Installed via Homebrew (`/opt/homebrew/lib/libusb-1.0.dylib`).
 
@@ -38,7 +38,7 @@ On modern macOS releases, Qualcomm/Quectel cellular modems connected via USB do 
 ## 3. Quick Start & Verification Commands
 
 ### A. Run Full Test Suite (Offline)
-Executes all 39 unit and integration tests covering 3GPP TS 23.040 PDU packing, UCS2 codecs, URC parsers, sensitive data masking, and mock telephony flows:
+Executes 43 offline checks covering PDU packing and inbox decoding, UCS2, URC parsing, log masking, SMS submission framing, and mock telephony flows:
 ```bash
 swift run ec20-tests
 ```
@@ -91,7 +91,7 @@ open EC20Companion.app
 - **PDU Decoder**: Decodes incoming SMS-DELIVER PDU with timestamp, sender number, and message text.
 - **URC Parsing**: Verifies parsing for `+CMTI`, `+CLIP`, `RING`, `NO CARRIER`, `+CREG`, `+CEREG`, `+CSQ`.
 - **Sensitive Masking**: Rigorous unit tests ensuring ICCID, IMSI, IMEI, and phone numbers are redacted in UI and log traces.
-- **Telephony State Machine**: Simulated incoming calls, call answering, dialing, and call termination.
+- **Telephony State Machine**: Simulated incoming calls, call answering, and call termination.
 
 ### ⏸️ Unverified / Safely Deferred (Requires User-Provided Test Destination)
 - **Actual Outgoing SMS Delivery**: Requires the user to authorize a specific destination phone number to avoid accidental SMS costs or unsolicited messages.
@@ -102,14 +102,14 @@ open EC20Companion.app
 ## 5. Audio & Voice Feasibility & Bridge Implementation
 
 ### Clean Verification Evidence (No Buffer Pollution)
-In initial probing, long output commands like `AT+QCFG=?` could leave unread residual bytes in the USB bulk IN pipe, polluting subsequent command responses. To resolve this, our transport engine performs an automatic input pipe flush before issuing queries, yielding 100% clean hardware responses:
+An initial ad-hoc probe was polluted by residual output from `AT+QCFG=?`. A subsequent isolated probe drained the receive endpoint before each query and confirmed these responses. The app's regular AT transport does not perform a per-command flush:
 - `AT+QPCMV=?` -> `+QPCMV: (0,1),(0-2)` (Confirmed: Hardware supports Voice over USB)
 - `AT+QPCMV?`  -> `+QPCMV: 0,0` (Confirmed: Default state is disabled, port 0 / NMEA)
 - `AT+QDAI?`   -> `+QDAI: 3,0,0,4,0,0,1,1` (Confirmed: Digital audio interface settings)
 
 ### Core Distinction: Call Signaling vs. Voice Audio
 A primary requirement of this project is to maintain a strict distinction between **Call Signaling** and **Voice Audio**:
-1. **Call Signaling is Complete**: Initiating a call (`ATD`), answering (`ATA`), ending (`ATH`), call tracking (`AT+CLCC`), and caller ID alerts (`+CLIP`/`RING`) are fully operational over USB Interface 2.
+1. **Call signaling is implemented**: The app sends `ATD`, `ATA`, and `ATH`, polls `AT+CLCC`, and handles caller ID events on USB Interface 2. These flows passed mock tests; no live call has been placed.
 2. **UAC Sound Card is Absent**: The USB descriptor does not expose a standard USB Audio Class (UAC 1.0/2.0) interface. macOS System Settings therefore does not recognize the EC20 as a microphone or speaker.
 
 ### Implemented CoreAudio ↔ USB Interface 1 Audio Bridge
@@ -121,9 +121,9 @@ Following the official *Quectel EC2x&EG9x Voice Over USB and UAC Application Not
   - Write to Endpoint `0x02`: 1600 bytes per 100ms (800 samples).
 - **Architecture**:
   - `EC20AudioBridge` (`Sources/EC20Transport/EC20AudioBridge.swift`) uses macOS `AudioToolbox.AudioQueue` to capture local microphone audio and route received PCM to system speakers.
-  - Automatically activates on call transition to `ACTIVE` (`onCallStarted` triggers `AT+QPCMV=1,0` and claims Interface 1).
+  - Enables `AT+QPCMV=1,0` and starts the bridge before dialing or answering, following the Quectel sequence.
   - Automatically deactivates on call termination (`onCallEnded` releases Interface 1 and issues `AT+QPCMV=0`).
   - Includes a standalone **Loopback Self-Test Mode** (Mic ➔ Speaker) in the GUI to verify the CoreAudio audio pipeline independently of carrier calls.
 
 > [!IMPORTANT]
-> **Field Verification Constraint**: While the audio processing pipeline and CoreAudio loopback are fully tested and operational in software and offline tests, no live cellular carrier call has been placed to an unauthorized number in accordance with safety instructions. Real-world acoustic speech quality across carrier networks must be verified by the user with an authorized test phone number.
+> **Field verification**: The GUI loopback mode started and stopped on this Mac. Audible quality and two-way carrier audio have not been measured. A user-controlled test number is needed for end-to-end SMS and call verification.

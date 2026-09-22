@@ -48,6 +48,7 @@ public final class EC20AudioBridge: @unchecked Sendable {
     private var isRunning: Bool = false
     private var isLoopback: Bool = false
     private var activeDeviceHandle: OpaquePointer?
+    private let runLock = NSLock()
     
     // Threads synchronization
     private let threadsDispatchGroup = DispatchGroup()
@@ -76,15 +77,29 @@ public final class EC20AudioBridge: @unchecked Sendable {
         self.lastErrorMessage = error
         stateChangeHandler?(newState, error)
     }
+
+    private func currentRunning() -> Bool {
+        runLock.lock()
+        defer { runLock.unlock() }
+        return isRunning
+    }
+
+    private func currentHandle() -> OpaquePointer? {
+        runLock.lock()
+        defer { runLock.unlock() }
+        return isRunning ? activeDeviceHandle : nil
+    }
     
     // MARK: - Start & Stop Bridge
     
     /// Starts bidirectional audio bridge over USB Interface 1 connected with macOS CoreAudio
     public func start(deviceHandle: OpaquePointer?, loopbackOnly: Bool = false) {
-        guard !isRunning else { return }
+        runLock.lock()
+        guard !isRunning else { runLock.unlock(); return }
         self.isLoopback = loopbackOnly
         self.activeDeviceHandle = deviceHandle
         self.isRunning = true
+        runLock.unlock()
         updateState(.starting)
         
         do {
@@ -117,8 +132,10 @@ public final class EC20AudioBridge: @unchecked Sendable {
     }
     
     public func stop() {
-        guard isRunning else { return }
+        runLock.lock()
+        guard isRunning else { runLock.unlock(); return }
         isRunning = false
+        runLock.unlock()
         
         // 1. Stop CoreAudio Queues first to stop producing input and playing output
         if let inQ = inputQueue {
@@ -126,14 +143,13 @@ public final class EC20AudioBridge: @unchecked Sendable {
             AudioQueueDispose(inQ, true)
             inputQueue = nil
         }
+        // The USB reader may still enqueue playback. Finish it before disposing output.
+        threadsDispatchGroup.wait()
         if let outQ = outputQueue {
             AudioQueueStop(outQ, true)
             AudioQueueDispose(outQ, true)
             outputQueue = nil
         }
-        
-        // 2. Wait for USB read/write threads to finish their in-flight transfers and exit
-        _ = threadsDispatchGroup.wait(timeout: .now() + 1.0)
         
         // 3. Now that threads have exited and are no longer using the handle, release Interface 1
         if !isLoopback, let handle = activeDeviceHandle {
@@ -214,7 +230,7 @@ public final class EC20AudioBridge: @unchecked Sendable {
     // MARK: - CoreAudio Callbacks
     
     fileprivate func handleMicrophoneInput(buffer: AudioQueueBufferRef) {
-        guard isRunning else { return }
+        guard currentRunning() else { return }
         let bytesCount = Int(buffer.pointee.mAudioDataByteSize)
         guard bytesCount > 0 else { return }
         
@@ -237,7 +253,7 @@ public final class EC20AudioBridge: @unchecked Sendable {
     }
     
     public func playPCMToSpeaker(pointer: UnsafeRawPointer, length: Int) {
-        guard let outQ = outputQueue, isRunning, length > 0 else { return }
+        guard let outQ = outputQueue, currentRunning(), length > 0 else { return }
         
         outputBufferLock.lock()
         let bufferToUse = freeOutputBuffers.isEmpty ? nil : freeOutputBuffers.removeFirst()
@@ -264,14 +280,14 @@ public final class EC20AudioBridge: @unchecked Sendable {
     
     private func startUSBReadLoop() {
         threadsDispatchGroup.enter()
+        let group = threadsDispatchGroup
         let thread = Thread { [weak self] in
+            defer { group.leave() }
             guard let self = self else { return }
-            defer { self.threadsDispatchGroup.leave() }
             
             var buffer = [UInt8](repeating: 0, count: self.readChunkSize)
             
-            while self.isRunning {
-                guard let handle = self.activeDeviceHandle else { break }
+            while let handle = self.currentHandle() {
                 var transferred: Int32 = 0
                 
                 let res = buffer.withUnsafeMutableBufferPointer { ptr in
@@ -301,12 +317,12 @@ public final class EC20AudioBridge: @unchecked Sendable {
     
     private func startUSBWriteLoop() {
         threadsDispatchGroup.enter()
+        let group = threadsDispatchGroup
         let thread = Thread { [weak self] in
+            defer { group.leave() }
             guard let self = self else { return }
-            defer { self.threadsDispatchGroup.leave() }
             
-            while self.isRunning {
-                guard let handle = self.activeDeviceHandle else { break }
+            while let handle = self.currentHandle() {
                 
                 var chunkToSend: Data? = nil
                 self.writeBufferLock.lock()

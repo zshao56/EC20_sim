@@ -187,12 +187,14 @@ public enum PDUCodec {
         
         if hasUDH && !userDataBytes.isEmpty {
             udhLength = Int(userDataBytes[0])
-            if userDataBytes.count > udhLength + 1 {
+            guard userDataBytes.count >= udhLength + 1 else { return nil }
+            if userDataBytes.count >= udhLength + 1 {
                 // Parse UDH Information Elements
                 var udhIdx = 1
-                while udhIdx < 1 + udhLength {
+                while udhIdx + 1 < 1 + udhLength {
                     let iei = userDataBytes[udhIdx]
                     let ieLen = Int(userDataBytes[udhIdx + 1])
+                    guard udhIdx + 2 + ieLen <= 1 + udhLength else { break }
                     if iei == 0x00 && ieLen == 3 && udhIdx + 4 < userDataBytes.count {
                         // 8-bit reference concat SMS
                         let ref = UInt16(userDataBytes[udhIdx + 2])
