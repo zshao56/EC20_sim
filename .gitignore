@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+EC20Companion.app/
+*.DS_Store
+DerivedData/
