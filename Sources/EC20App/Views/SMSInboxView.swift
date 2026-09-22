@@ -60,7 +60,7 @@ public struct SMSInboxView: View {
                         ForEach(controller.smsMessages) { msg in
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Text(msg.maskedNumber)
+                                    Text(msg.senderOrRecipient)
                                         .font(.subheadline.bold())
                                     Spacer()
                                     if let area = msg.storageArea, let idx = msg.storageIndex {
@@ -101,8 +101,9 @@ public struct SMSInboxView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(msg.isIncoming ? "From: \(msg.maskedNumber)" : "To: \(msg.maskedNumber)")
+                            Text(msg.isIncoming ? "From: \(msg.senderOrRecipient)" : "To: \(msg.senderOrRecipient)")
                                 .font(.title3.bold())
+                                .textSelection(.enabled)
                             Text(msg.timestamp.formatted(date: .complete, time: .standard))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
