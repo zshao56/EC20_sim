@@ -93,7 +93,7 @@ public struct StatusDashboardView: View {
                 HStack {
                     Image(systemName: "shield.lefthalf.filled")
                         .foregroundColor(.blue)
-                    Text("Security Notice: All sensitive parameters (ICCID, IMSI, IMEI, phone numbers) are masked in UI and diagnostic logs.")
+                    Text("SIM identifiers are masked on this dashboard. SMS sender numbers are shown in the inbox; diagnostic logs mask phone numbers.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

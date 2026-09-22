@@ -13,7 +13,7 @@ On modern macOS releases, Qualcomm/Quectel cellular modems connected via USB do 
 - **Direct USB Claiming**: Directly opens device `0x2c7c:0x0125` and claims USB **Interface 2** (dedicated AT and URC port).
 - **Endpoint Pipeline**: Asynchronous bulk OUT (`0x03`) and bulk IN (`0x84`) transfer engine with automated background read thread.
 - **Actor-Isolated Serial Queue**: Ensures that single in-flight AT commands are sequenced safely with strict timeout bounds while allowing Unsolicited Result Codes (URCs) to be demultiplexed in real time.
-- **Privacy & Security Masking**: All sensitive identifiers (ICCID, IMSI, IMEI, and telephone numbers) are masked at the presentation and logging layer (`8986************9588`, `+86 138****5678`).
+- **Privacy & Security Masking**: The dashboard masks ICCID, IMSI, and IMEI. The SMS inbox shows complete sender numbers; diagnostic logs mask phone numbers and message payloads.
 
 ### USB Interface Topology (Quectel EC20-CE)
 | Interface | Endpoints | Protocol / Class | Description & State in App |
