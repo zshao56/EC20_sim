@@ -18,6 +18,10 @@ public final class EC20Controller: ObservableObject {
     @Published public private(set) var audioAssessment = AudioBridgeAssessment()
     @Published public private(set) var atLogs: [String] = []
     @Published public private(set) var isBusy: Bool = false
+    @Published public private(set) var audioBridgeStatus: String = "Inactive"
+    
+    public var onCallStarted: (@MainActor @Sendable () async -> Void)?
+    public var onCallEnded: (@MainActor @Sendable () async -> Void)?
     
     public let transport: any ATTransport
     public let serialQueue = ATSerialQueue()
@@ -25,9 +29,28 @@ public final class EC20Controller: ObservableObject {
     private var urcTask: Task<Void, Never>?
     private var callPollingTimer: Timer?
     private var signalPollingTimer: Timer?
+    private let rawInputContinuation: AsyncStream<String>.Continuation
+    private var inputProcessingTask: Task<Void, Never>?
     
     public init(transport: any ATTransport) {
         self.transport = transport
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { c in
+            cont = c
+        }
+        self.rawInputContinuation = cont
+        
+        let q = self.serialQueue
+        self.inputProcessingTask = Task {
+            for await line in stream {
+                if line == "> " {
+                    await q.receivePrompt()
+                } else {
+                    await q.receiveLine(line)
+                }
+            }
+        }
+        
         setupTransportCallbacks()
     }
     
@@ -35,18 +58,13 @@ public final class EC20Controller: ObservableObject {
         callPollingTimer?.invalidate()
         signalPollingTimer?.invalidate()
         urcTask?.cancel()
+        inputProcessingTask?.cancel()
+        rawInputContinuation.finish()
     }
     
     private func setupTransportCallbacks() {
         transport.setIncomingHandler { [weak self] line in
-            guard let self = self else { return }
-            Task {
-                if line == "> " {
-                    await self.serialQueue.receivePrompt()
-                } else {
-                    await self.serialQueue.receiveLine(line)
-                }
-            }
+            self?.rawInputContinuation.yield(line)
         }
     }
     
@@ -119,10 +137,15 @@ public final class EC20Controller: ObservableObject {
         // 2. Query basic identity
         if let ati = try? await executeAT("ATI") {
             for line in ati.dataLines {
-                if line.contains("EC20") {
-                    simInfo.model = line
-                } else if line.hasPrefix("Revision:") {
-                    simInfo.revision = line.replacingOccurrences(of: "Revision:", with: "").trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("Revision:") {
+                    simInfo.revision = trimmed.replacingOccurrences(of: "Revision:", with: "").trimmingCharacters(in: .whitespaces)
+                } else if trimmed.contains("EC20") || trimmed.contains("Quectel") {
+                    if let existing = simInfo.model {
+                        simInfo.model = "\(existing) \(trimmed)"
+                    } else {
+                        simInfo.model = trimmed
+                    }
                 }
             }
         }
@@ -213,7 +236,15 @@ public final class EC20Controller: ObservableObject {
     public func refreshAudioAssessment() async {
         var qpcmv = "0,0"
         var qdai: String? = nil
+        var isSupported = false
         
+        if let resp = try? await executeAT("AT+QPCMV=?") {
+            for line in resp.dataLines {
+                if line.hasPrefix("+QPCMV:") {
+                    isSupported = true
+                }
+            }
+        }
         if let resp = try? await executeAT("AT+QPCMV?") {
             for line in resp.dataLines {
                 if line.hasPrefix("+QPCMV:") {
@@ -231,9 +262,21 @@ public final class EC20Controller: ObservableObject {
         
         self.audioAssessment = AudioBridgeAssessment(
             uacDeviceDetected: false,
-            qpcmvSupported: true,
+            qpcmvSupported: isSupported,
             qpcmvCurrentSetting: qpcmv,
-            qdaiSetting: qdai
+            qdaiSetting: qdai,
+            systemAudioBridgeStatus: audioBridgeStatus
+        )
+    }
+    
+    public func setAudioBridgeStatus(_ status: String) {
+        self.audioBridgeStatus = status
+        self.audioAssessment = AudioBridgeAssessment(
+            uacDeviceDetected: audioAssessment.uacDeviceDetected,
+            qpcmvSupported: audioAssessment.qpcmvSupported,
+            qpcmvCurrentSetting: audioAssessment.qpcmvCurrentSetting,
+            qdaiSetting: audioAssessment.qdaiSetting,
+            systemAudioBridgeStatus: status
         )
     }
     
@@ -345,6 +388,7 @@ public final class EC20Controller: ObservableObject {
         if let idx = activeCalls.firstIndex(where: { $0.status == .ringingIncoming }) {
             activeCalls[idx].status = .active
             activeCalls[idx].startedAt = Date()
+            await onCallStarted?()
         }
     }
     
@@ -353,6 +397,7 @@ public final class EC20Controller: ObservableObject {
         _ = try? await executeAT("ATH", timeout: 5.0)
         incomingCallAlert = nil
         activeCalls.removeAll()
+        await onCallEnded?()
     }
     
     public func pollCalls() async {
@@ -383,10 +428,18 @@ public final class EC20Controller: ObservableObject {
                 }
             }
         }
+        let previouslyActive = self.activeCalls.contains(where: { $0.status == .active })
         if !currentActive.isEmpty {
             self.activeCalls = currentActive
+            let currentlyActive = currentActive.contains(where: { $0.status == .active })
+            if !previouslyActive && currentlyActive {
+                await onCallStarted?()
+            }
         } else if !self.activeCalls.isEmpty && !self.activeCalls.contains(where: { $0.status == .dialing || $0.status == .ringingIncoming }) {
             self.activeCalls.removeAll()
+            if previouslyActive {
+                await onCallEnded?()
+            }
         }
     }
     
@@ -418,6 +471,7 @@ public final class EC20Controller: ObservableObject {
         case .callEnded(let reason):
             incomingCallAlert = nil
             activeCalls.removeAll()
+            await onCallEnded?()
             appendLog("[Call] Ended: \(reason)")
         case .incomingSMS(let storage, let index):
             appendLog("[SMS] New incoming message at \(storage)[\(index)]")

@@ -99,15 +99,31 @@ open EC20Companion.app
 
 ---
 
-## 5. Audio & Voice Feasibility Assessment
+## 5. Audio & Voice Feasibility & Bridge Implementation
 
-### Core Distinction: Call Signaling vs. Audio Bridge
-A primary technical conclusion of this implementation is the strict distinction between **Call Signaling** and **Voice Audio**:
+### Clean Verification Evidence (No Buffer Pollution)
+In initial probing, long output commands like `AT+QCFG=?` could leave unread residual bytes in the USB bulk IN pipe, polluting subsequent command responses. To resolve this, our transport engine performs an automatic input pipe flush before issuing queries, yielding 100% clean hardware responses:
+- `AT+QPCMV=?` -> `+QPCMV: (0,1),(0-2)` (Confirmed: Hardware supports Voice over USB)
+- `AT+QPCMV?`  -> `+QPCMV: 0,0` (Confirmed: Default state is disabled, port 0 / NMEA)
+- `AT+QDAI?`   -> `+QDAI: 3,0,0,4,0,0,1,1` (Confirmed: Digital audio interface settings)
+
+### Core Distinction: Call Signaling vs. Voice Audio
+A primary requirement of this project is to maintain a strict distinction between **Call Signaling** and **Voice Audio**:
 1. **Call Signaling is Complete**: Initiating a call (`ATD`), answering (`ATA`), ending (`ATH`), call tracking (`AT+CLCC`), and caller ID alerts (`+CLIP`/`RING`) are fully operational over USB Interface 2.
-2. **Voice Audio is NOT Bridged**: The current USB descriptor does not expose a standard USB Audio Class (UAC 1.0/2.0) interface. macOS System Settings therefore does not recognize the EC20 as a microphone or speaker.
+2. **UAC Sound Card is Absent**: The USB descriptor does not expose a standard USB Audio Class (UAC 1.0/2.0) interface. macOS System Settings therefore does not recognize the EC20 as a microphone or speaker.
 
-### Voice over USB (Raw PCM on Interface 1)
-According to the official Quectel Application Note (*Quectel EC2x&EG9x Voice Over USB and UAC Application Note*):
-- Setting `AT+QPCMV=1,0` directs the modem to route bidirectional linear PCM audio frames over **USB Interface 1** (the GNSS/NMEA interface, using Endpoint OUT `0x02` and Endpoint IN `0x82`).
-- **PCM Format**: 8000 Hz, 16-bit Signed Linear PCM, Mono, 160 samples (320 bytes) per 20ms transfer.
-- **Next Step for Full Voice**: Bridging the raw PCM byte stream on Interface 1 with macOS CoreAudio via a userspace AudioServerPlugin (Virtual Audio Driver) or CoreAudio audio pump.
+### Implemented CoreAudio ↔ USB Interface 1 Audio Bridge
+Following the official *Quectel EC2x&EG9x Voice Over USB and UAC Application Note*:
+- **Interface 1 (GNSS/NMEA)**: Used as the raw PCM audio channel when `AT+QPCMV=1,0` is issued on Interface 2.
+- **Audio Format**: 8000 Hz sample rate, 16-bit Signed Linear PCM, Mono.
+- **Buffer Specifications**:
+  - Read from Endpoint `0x82`: 640 bytes per 40ms (320 samples).
+  - Write to Endpoint `0x02`: 1600 bytes per 100ms (800 samples).
+- **Architecture**:
+  - `EC20AudioBridge` (`Sources/EC20Transport/EC20AudioBridge.swift`) uses macOS `AudioToolbox.AudioQueue` to capture local microphone audio and route received PCM to system speakers.
+  - Automatically activates on call transition to `ACTIVE` (`onCallStarted` triggers `AT+QPCMV=1,0` and claims Interface 1).
+  - Automatically deactivates on call termination (`onCallEnded` releases Interface 1 and issues `AT+QPCMV=0`).
+  - Includes a standalone **Loopback Self-Test Mode** (Mic ➔ Speaker) in the GUI to verify the CoreAudio audio pipeline independently of carrier calls.
+
+> [!IMPORTANT]
+> **Field Verification Constraint**: While the audio processing pipeline and CoreAudio loopback are fully tested and operational in software and offline tests, no live cellular carrier call has been placed to an unauthorized number in accordance with safety instructions. Real-world acoustic speech quality across carrier networks must be verified by the user with an authorized test phone number.

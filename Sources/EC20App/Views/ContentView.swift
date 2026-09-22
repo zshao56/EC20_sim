@@ -28,6 +28,9 @@ public struct ContentView: View {
     @StateObject private var mockController: EC20Controller
     @StateObject private var uiState = AppUIState()
     
+    private let realAudioBridge = EC20AudioBridge()
+    private let mockAudioBridge = EC20AudioBridge()
+    
     public init() {
         let realTransport = LibusbATTransport()
         let mockTransport = MockATTransport()
@@ -37,6 +40,10 @@ public struct ContentView: View {
     
     private var activeController: EC20Controller {
         uiState.useSimulation ? mockController : realController
+    }
+    
+    private var activeAudioBridge: EC20AudioBridge {
+        uiState.useSimulation ? mockAudioBridge : realAudioBridge
     }
     
     public var body: some View {
@@ -81,7 +88,7 @@ public struct ContentView: View {
                     case .calls:
                         CallControlView(controller: activeController, uiState: uiState)
                     case .voiceBridge:
-                        VoiceBridgeView(controller: activeController)
+                        VoiceBridgeView(controller: activeController, audioBridge: activeAudioBridge)
                     case .console:
                         ATConsoleView(controller: activeController, uiState: uiState)
                     }
@@ -90,12 +97,41 @@ public struct ContentView: View {
             }
         }
         .task {
+            setupAudioBridgeHooks()
             await activeController.connect()
         }
         .onChange(of: uiState.useSimulation) { _ in
             Task {
                 await activeController.connect()
             }
+        }
+    }
+    
+    private func setupAudioBridgeHooks() {
+        // Real modem audio bridge hooks
+        realController.onCallStarted = { [weak realController, weak realAudioBridge] in
+            guard let realController = realController, let realAudioBridge = realAudioBridge else { return }
+            _ = try? await realController.executeAT("AT+QPCMV=1,0")
+            realAudioBridge.start(deviceHandle: realController.transport.rawDeviceHandle, loopbackOnly: false)
+            realController.setAudioBridgeStatus(realAudioBridge.state.rawValue)
+        }
+        realController.onCallEnded = { [weak realController, weak realAudioBridge] in
+            guard let realController = realController, let realAudioBridge = realAudioBridge else { return }
+            realAudioBridge.stop()
+            _ = try? await realController.executeAT("AT+QPCMV=0")
+            realController.setAudioBridgeStatus(realAudioBridge.state.rawValue)
+        }
+        
+        // Mock audio bridge hooks (loopback test)
+        mockController.onCallStarted = { [weak mockController, weak mockAudioBridge] in
+            guard let mockController = mockController, let mockAudioBridge = mockAudioBridge else { return }
+            mockAudioBridge.start(deviceHandle: nil, loopbackOnly: true)
+            mockController.setAudioBridgeStatus(mockAudioBridge.state.rawValue)
+        }
+        mockController.onCallEnded = { [weak mockController, weak mockAudioBridge] in
+            guard let mockController = mockController, let mockAudioBridge = mockAudioBridge else { return }
+            mockAudioBridge.stop()
+            mockController.setAudioBridgeStatus(mockAudioBridge.state.rawValue)
         }
     }
     
@@ -134,6 +170,21 @@ public struct ContentView: View {
                 .background(activeController.simInfo.cpinStatus == .ready ? Color.green.opacity(0.15) : Color.red.opacity(0.15))
                 .foregroundColor(activeController.simInfo.cpinStatus == .ready ? .green : .red)
                 .cornerRadius(4)
+            
+            // Audio Bridge Pill
+            if activeAudioBridge.state != .stopped {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                        .foregroundColor(.green)
+                    Text("Audio Bridge: \(activeAudioBridge.state.rawValue)")
+                        .font(.caption2.bold())
+                        .foregroundColor(.green)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.15))
+                .cornerRadius(4)
+            }
             
             Spacer()
             

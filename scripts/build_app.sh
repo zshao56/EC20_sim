@@ -49,8 +49,13 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>EC20 Companion requires access to the microphone for bidirectional Voice over USB cellular calls.</string>
 </dict>
 </plist>
 EOF
+
+echo "==> Ad-hoc signing ${APP_DIR}..."
+codesign --force --deep --sign - "${APP_DIR}"
 
 echo "==> EC20Companion.app created successfully at ${APP_DIR}"

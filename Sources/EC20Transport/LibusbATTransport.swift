@@ -94,19 +94,27 @@ public final class LibusbATTransport: ATTransport, @unchecked Sendable {
         }
     }
     
+    public var rawDeviceHandle: OpaquePointer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return deviceHandle
+    }
+    
     public func send(raw: String) async throws {
         guard isConnected, let handle = deviceHandle else {
             throw NSError(domain: "LibusbATTransport", code: -2, userInfo: [NSLocalizedDescriptionKey: "Transport not connected"])
         }
         
+        let safeHandle = SafeDevicePointer(handle)
         let data = Array(raw.utf8)
+        
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
                 var transferred: Int32 = 0
                 var buffer = data
                 let res = buffer.withUnsafeMutableBufferPointer { ptr in
-                    libusb_bulk_transfer(handle, self.epOut, ptr.baseAddress, Int32(ptr.count), &transferred, 2000)
+                    libusb_bulk_transfer(safeHandle.pointer, self.epOut, ptr.baseAddress, Int32(ptr.count), &transferred, 2000)
                 }
                 if res == 0 {
                     continuation.resume()

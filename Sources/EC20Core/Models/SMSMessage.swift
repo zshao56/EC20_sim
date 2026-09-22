@@ -39,4 +39,12 @@ public struct SMSMessage: Identifiable, Hashable, Equatable, Sendable {
     public var maskedNumber: String {
         SensitiveMasker.mask(phoneNumber: senderOrRecipient)
     }
+    
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    public static func == (lhs: SMSMessage, rhs: SMSMessage) -> Bool {
+        lhs.id == rhs.id
+    }
 }
