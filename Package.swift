@@ -12,6 +12,7 @@ let package = Package(
         .executable(name: "EC20App", targets: ["EC20App"]),
         .executable(name: "ec20-cli", targets: ["EC20CLI"]),
         .executable(name: "ec20-tests", targets: ["EC20Tests"]),
+        .library(name: "EC20BridgeProtocol", targets: ["EC20BridgeProtocol"]),
         .library(name: "EC20Core", targets: ["EC20Core"]),
         .library(name: "EC20Transport", targets: ["EC20Transport"]),
     ],
@@ -27,8 +28,12 @@ let package = Package(
             ]
         ),
         .target(
-            name: "EC20Core",
+            name: "EC20BridgeProtocol",
             dependencies: []
+        ),
+        .target(
+            name: "EC20Core",
+            dependencies: ["EC20BridgeProtocol"]
         ),
         .target(
             name: "EC20Transport",
@@ -42,7 +47,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "EC20App",
-            dependencies: ["EC20Core", "EC20Transport"],
+            dependencies: ["EC20Core", "EC20Transport", "EC20BridgeProtocol"],
             swiftSettings: [
                 .unsafeFlags(brewIncludeFlags)
             ]
@@ -56,7 +61,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "EC20Tests",
-            dependencies: ["EC20Core", "EC20Transport"],
+            dependencies: ["EC20Core", "EC20Transport", "EC20BridgeProtocol"],
             swiftSettings: [
                 .unsafeFlags(brewIncludeFlags)
             ]

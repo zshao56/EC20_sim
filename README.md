@@ -1,129 +1,80 @@
-# EC20 Companion for macOS
+# EC20 Companion：让 Mac 使用 EC20 的短信与电话
 
-A native macOS application and diagnostic suite designed specifically for Apple Silicon Macs and the **Quectel EC20-CE-HDLG** (USB `VID: 0x2c7c`, `PID: 0x0125`) cellular modem.
+一款面向 **Apple Silicon Mac + 移远 EC20-CE-HDLG** 的中文菜单栏应用。通过 USB Type-C 连接 EC20 后，可在 Mac 上查看 SIM 与信号、按对话管理短信、管理联系人与通话记录，并使用拨号和来电界面。项目还包含一个实验性的 iPhone 局域网配套客户端源码。
 
----
+> 这是个人项目的源码，尚未发布经过公证的安装包。部分功能只有模拟测试或有限的硬件验证；使用前请先阅读[已知限制](#已知限制)。
 
-## 1. System Overview & Architecture
+## 功能与验证状态
 
-### Hardware & Driverless Userspace Design
-On modern macOS releases, Qualcomm/Quectel cellular modems connected via USB do not load serial driver nodes (such as `/dev/cu.usb*`), and `system_profiler SPUSBDataType` frequently misreports or omits vendor-specific devices. 
+| 功能 | 当前状态 |
+| --- | --- |
+| 识别 EC20、读取 SIM 状态、运营商及信号 | 已在 `2c7c:0125` 设备上验证基础 AT 通信 |
+| 中文菜单栏、未读数、短信通知、来电浮窗 | 已实现；系统通知需授予权限 |
+| 短信对话、回复、联系人备注、号码归属地、批量删除 | 已实现；编解码和删除流程有离线模拟测试，实际发送需自行验证 |
+| 本地 SQLite 短信、联系人、通话记录 | 已实现；数据保存在本机用户目录 |
+| 拨号、接听、挂断、USB PCM 语音桥接 | 信令和音频代码已实现；运营商通话及双向语音尚未完成端到端验证 |
+| iPhone 局域网配套客户端 | 提供源码与 XcodeGen 配置；尚未在 iPhone 真机完成构建和验收 |
+| 蜂窝网络开关 | 实验性；界面状态曾出现自动恢复，建议暂不使用 |
 
-`EC20Companion` circumvents this limitation through a direct userspace USB transport built on `libusb-1.0`:
-- **Direct USB Claiming**: Directly opens device `0x2c7c:0x0125` and claims USB **Interface 2** (dedicated AT and URC port).
-- **Endpoint Pipeline**: Asynchronous bulk OUT (`0x03`) and bulk IN (`0x84`) transfer engine with automated background read thread.
-- **Actor-Isolated Serial Queue**: Ensures that single in-flight AT commands are sequenced safely with strict timeout bounds while allowing Unsolicited Result Codes (URCs) to be demultiplexed in real time.
-- **Privacy & Security Masking**: The dashboard masks ICCID, IMSI, and IMEI. The SMS inbox shows complete sender numbers; diagnostic logs mask phone numbers and message payloads.
+## 硬件与环境
 
-### USB Interface Topology (Quectel EC20-CE)
-| Interface | Endpoints | Protocol / Class | Description & State in App |
-|---|---|---|---|
-| **0** | EP 0x01 OUT, EP 0x81 IN | Vendor (0xFF) | DIAG / DM (Qualcomm QCDM logging) |
-| **1** | EP 0x02 OUT, EP 0x82 IN, EP 0x83 INT | Vendor (0xFF) | GNSS / NMEA; Voice over USB PCM stream (`AT+QPCMV=1,0`) |
-| **2** | EP 0x03 OUT, EP 0x84 IN, EP 0x85 INT | Vendor (0xFF) | **Primary AT Command & URC Port** (Active Transport) |
-| **3** | EP 0x04 OUT, EP 0x86 IN, EP 0x87 INT | Vendor (0xFF) | Modem / PPP Dialup port (Standby) |
-| **4** | EP 0x05 OUT, EP 0x88 IN, EP 0x89 INT | Vendor (0xFF) | RMNET / Qualcomm MSM Network Interface |
+- Apple Silicon Mac，macOS **26 或更新版本**。Swift Package 的最低版本声明为 macOS 13，但当前打包脚本所用的 Homebrew `libusb` 二进制要求 macOS 26。
+- 移远 Quectel **EC20-CE-HDLG**，USB VID `0x2c7c`、PID `0x0125`，经 Type-C 连接。其他 EC20 型号和 USB 拓扑未验证。
+- Xcode Command Line Tools 或 Xcode，以及 Homebrew `libusb`：
 
----
+  ```bash
+  xcode-select --install
+  brew install libusb
+  ```
 
-## 2. Requirements & Prerequisites
+应用通过 `libusb` 直接访问模块的 USB Interface 2（AT/URC，OUT `0x03`、IN `0x84`）；不依赖 `/dev/cu.*` 串口设备。macOS 上的 ECM 网络接口由系统管理。
 
-1. **Hardware**: Apple Silicon Mac (M1/M2/M3/M4) with Quectel EC20-CE-HDLG connected via USB Type-C.
-2. **macOS**: Built and verified on the connected Mac. The Swift package targets macOS 13; this bundle links to the locally installed Homebrew `libusb`, so copying the bundle to another Mac requires a compatible `libusb` build.
-3. **Swift**: Swift 6.4 (Command Line Tools or Xcode).
-4. **libusb**: Installed via Homebrew (`/opt/homebrew/lib/libusb-1.0.dylib`).
+## 构建与运行
 
----
+```bash
+git clone https://github.com/zshao56/EC20_sim.git
+cd EC20_sim
+./scripts/build_app.sh
+open ./EC20Companion.app
+```
 
-## 3. Quick Start & Verification Commands
+`build_app.sh` 会在当前仓库生成应用包，并把 Homebrew 的 `libusb` 动态库复制进包内。若本机 Command Line Tools 存在 `MacOSX26.5.sdk`，脚本会优先使用它。也可以运行 `./scripts/build_app.sh --install` 安装到 `/Applications`；该选项会覆盖同名旧版应用，请先备份需要保留的版本。
 
-### A. Run Full Test Suite (Offline)
-Executes 43 offline checks covering PDU packing and inbox decoding, UCS2, URC parsing, log masking, SMS submission framing, and mock telephony flows:
+**只跑离线测试**（不会访问 EC20、发送短信或拨号）：
+
 ```bash
 swift run ec20-tests
 ```
 
-### B. Run Real Hardware Diagnostic Probe
-Executes a non-destructive hardware probe through `libusb` on Interface 2, querying module identity, SIM state, network registration, signal quality, and audio capabilities:
-```bash
-./scripts/run_probe.sh
-# or directly:
-swift run ec20-cli
-```
+`./scripts/run_probe.sh` 会连接真实模块进行只读诊断，需确认设备连接后再执行。仓库中的 `iOS/README.md` 说明 iPhone 配套客户端的构建方式及限制。
 
-### C. Build the macOS Application (.app)
-Generates the native double-clickable `EC20Companion.app` bundle:
-```bash
-./scripts/build_app.sh
-```
+## 界面与数据
 
-### D. Launch GUI Application
-```bash
-open EC20Companion.app
-```
+菜单栏显示应用入口和未读短信数。主窗口集中显示短信、电话、联系人与基础状态；诊断日志和高级功能位于“设置与高级”。短信以联系人或号码分组，可直接回复、存为联系人；最近通话支持回拨和批量删除。号码归属地由离线规则估计，携号转网后可能不准确。
 
----
+短信、联系人和通话记录保存在 `~/Library/Application Support/com.quectel.ec20companion/ec20companion_v2.sqlite3`，**不在仓库内**。发布日志、截图或报错前，请自行检查手机号、短信内容、ICCID、IMSI、IMEI 和配对信息。
 
-## 4. Verification Handoff Matrix
+### SIM 短信容量
 
-### ✅ Verified on Real EC20 Hardware (`2c7c:0125`)
-| Item | AT Command / Method | Live Hardware Result |
-|---|---|---|
-| **USB Claiming** | `libusb_claim_interface(dev, 2)` | Interface 2 claimed successfully without kernel driver conflict |
-| **Basic Communication** | `ATE0`, `AT+CMEE=2` | Echo disabled, verbose error reporting active |
-| **Identity & Firmware** | `ATI` | `Quectel EC20F`, `Revision: EC20CEHDLGR08A02M1G` |
-| **SIM Card Status** | `AT+CPIN?` | `+CPIN: READY` |
-| **CS Domain Network** | `AT+CREG?` | `+CREG: 0,1` (Registered, Home Network) |
-| **EPS/LTE Network** | `AT+CEREG?` | `+CEREG: 0,1` (Registered, LTE Home Network) |
-| **Cellular Operator** | `AT+COPS?` | `+COPS: 0,0,"CHN-UNICOM",7` (China Unicom LTE) |
-| **Signal Quality** | `AT+CSQ` | `+CSQ: 21,99` (-71 dBm, 4/4 bars) |
-| **SIM ICCID** | `AT+QCCID` | Read successfully (masked as `8986************9588`) |
-| **IMSI** | `AT+CIMI` | Read successfully (masked as `4600*******7957`) |
-| **IMEI / Serial** | `AT+GSN` | Read successfully (masked as `8691*******2371`) |
-| **URC Port Binding** | `AT+QURCCFG="urcport"` | Verified bound to `"usbat"` (Interface 2) |
-| **Caller ID Feature** | `AT+CLIP=1` | Enabled successfully |
-| **Voice over USB Query** | `AT+QPCMV=?`, `AT+QPCMV?` | Query supported: `(0,1),(0-2)`. Current non-destructive value: `0,0` |
-| **Digital Audio Setting**| `AT+QDAI?` | `+QDAI: 3,0,0,4,0,0,1,1` |
+EC20 会从模块存储区 `ME` 和 SIM 存储区 `SM` 同步短信到本地 SQLite，但**同步不会自动清空 SIM**。如果 SIM 只有 50 条容量，存满后仍可能无法接收新短信。当前删除操作会连同应用中的本地记录一起删除，尚未实现“核对本地备份后仅删除 SIM 副本”的自动归档。重要短信请另行备份，再按需清理 SIM 中的旧短信。
 
-### ✅ Verified by Offline Test Suite (`ec20-tests`)
-- **PDU 7-Bit GSM**: Septet packing/unpacking conforms to 3GPP TS 23.038.
-- **PDU UCS2**: Chinese string encoding (`4F60597D...`), multipart concatenation splitting (UDH IEI `0x00`), and single PDU TPDU generation.
-- **PDU Decoder**: Decodes incoming SMS-DELIVER PDU with timestamp, sender number, and message text.
-- **URC Parsing**: Verifies parsing for `+CMTI`, `+CLIP`, `RING`, `NO CARRIER`, `+CREG`, `+CEREG`, `+CSQ`.
-- **Sensitive Masking**: Rigorous unit tests ensuring ICCID, IMSI, IMEI, and phone numbers are redacted in UI and log traces.
-- **Telephony State Machine**: Simulated incoming calls, call answering, and call termination.
+## 已知限制
 
-### ⏸️ Unverified / Safely Deferred (Requires User-Provided Test Destination)
-- **Actual Outgoing SMS Delivery**: Requires the user to authorize a specific destination phone number to avoid accidental SMS costs or unsolicited messages.
-- **Actual Outgoing Call Dial-Out**: Requires the user to authorize a specific test number to avoid accidental carrier billing or triggering operator alarms.
+- 没有对外发短信、运营商通话和双向语音做完整实机验收；这些操作可能产生运营商费用。请只向自己控制的号码测试。
+- 蜂窝网络开关可能影响 macOS 路由；此前出现过关闭后 Wi-Fi 上网异常，后续未继续做蜂窝网络测试。建议保持现有网络设置，先使用短信和电话功能。
+- iPhone 客户端需要 Mac 与 iPhone 在同一局域网，Mac 网关默认关闭；没有后台 VoIP 推送，也没有把通话音频传到 iPhone。iOS 源码尚未完成真机验收。
+- 本项目不是系统级电话服务，无法保证与 macOS/iPhone 原生“电话”“信息”应用互通，也不承诺支持其他 EC20 硬件版本。
 
----
+## 项目结构
 
-## 5. Audio & Voice Feasibility & Bridge Implementation
+| 路径 | 内容 |
+| --- | --- |
+| `Sources/EC20App` | macOS 菜单栏和中文 GUI |
+| `Sources/EC20Core` | AT 控制、短信、SQLite、网络状态和网关 |
+| `Sources/EC20Transport` | `libusb` 传输与语音桥接 |
+| `Sources/EC20BridgeProtocol` | iPhone 局域网协议与加密会话 |
+| `Sources/EC20Tests` | 离线模拟测试 |
+| `iOS/` | iPhone 配套客户端源码与说明 |
+| `scripts/` | 构建、诊断与图标生成脚本 |
 
-### Clean Verification Evidence (No Buffer Pollution)
-An initial ad-hoc probe was polluted by residual output from `AT+QCFG=?`. A subsequent isolated probe drained the receive endpoint before each query and confirmed these responses. The app's regular AT transport does not perform a per-command flush:
-- `AT+QPCMV=?` -> `+QPCMV: (0,1),(0-2)` (Confirmed: Hardware supports Voice over USB)
-- `AT+QPCMV?`  -> `+QPCMV: 0,0` (Confirmed: Default state is disabled, port 0 / NMEA)
-- `AT+QDAI?`   -> `+QDAI: 3,0,0,4,0,0,1,1` (Confirmed: Digital audio interface settings)
-
-### Core Distinction: Call Signaling vs. Voice Audio
-A primary requirement of this project is to maintain a strict distinction between **Call Signaling** and **Voice Audio**:
-1. **Call signaling is implemented**: The app sends `ATD`, `ATA`, and `ATH`, polls `AT+CLCC`, and handles caller ID events on USB Interface 2. These flows passed mock tests; no live call has been placed.
-2. **UAC Sound Card is Absent**: The USB descriptor does not expose a standard USB Audio Class (UAC 1.0/2.0) interface. macOS System Settings therefore does not recognize the EC20 as a microphone or speaker.
-
-### Implemented CoreAudio ↔ USB Interface 1 Audio Bridge
-Following the official *Quectel EC2x&EG9x Voice Over USB and UAC Application Note*:
-- **Interface 1 (GNSS/NMEA)**: Used as the raw PCM audio channel when `AT+QPCMV=1,0` is issued on Interface 2.
-- **Audio Format**: 8000 Hz sample rate, 16-bit Signed Linear PCM, Mono.
-- **Buffer Specifications**:
-  - Read from Endpoint `0x82`: 640 bytes per 40ms (320 samples).
-  - Write to Endpoint `0x02`: 1600 bytes per 100ms (800 samples).
-- **Architecture**:
-  - `EC20AudioBridge` (`Sources/EC20Transport/EC20AudioBridge.swift`) uses macOS `AudioToolbox.AudioQueue` to capture local microphone audio and route received PCM to system speakers.
-  - Enables `AT+QPCMV=1,0` and starts the bridge before dialing or answering, following the Quectel sequence.
-  - Automatically deactivates on call termination (`onCallEnded` releases Interface 1 and issues `AT+QPCMV=0`).
-  - Includes a standalone **Loopback Self-Test Mode** (Mic ➔ Speaker) in the GUI to verify the CoreAudio audio pipeline independently of carrier calls.
-
-> [!IMPORTANT]
-> **Field verification**: The GUI loopback mode started and stopped on this Mac. Audible quality and two-way carrier audio have not been measured. A user-controlled test number is needed for end-to-end SMS and call verification.
+欢迎提交 Issue，说明 EC20 型号、macOS 版本、复现步骤及**脱敏后的**日志。目前仓库尚未选择开源许可证；在许可证明确前，请先联系仓库所有者确认再分发修改版。

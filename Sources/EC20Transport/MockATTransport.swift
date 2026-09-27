@@ -4,41 +4,42 @@ import EC20Core
 public final class MockATTransport: ATTransport, @unchecked Sendable {
     public let transportName = "Mock AT Transport (Simulation Mode)"
     public private(set) var isConnected: Bool = false
-    
+
     private var incomingHandler: (@Sendable (String) -> Void)? = nil
     private let lock = NSLock()
-    
+
     private var isAwaitingSMSData: Bool = false
     public private(set) var lastSMSPayloadHadCRLF = false
     private var activeCalls: [String] = []
-    
+    public var onCommand: (@Sendable (String) -> String?)? = nil
+
     public init() {}
-    
+
     public func setIncomingHandler(_ handler: @escaping @Sendable (String) -> Void) {
         lock.lock()
         self.incomingHandler = handler
         lock.unlock()
     }
-    
+
     public func open() throws {
         lock.lock()
         isConnected = true
         lock.unlock()
     }
-    
+
     public func close() {
         lock.lock()
         isConnected = false
         lock.unlock()
     }
-    
+
     public func send(raw: String) async throws {
         guard isConnected else {
             throw NSError(domain: "MockATTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "Mock transport disconnected"])
         }
-        
+
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         // Handle SMS prompt input
         if isAwaitingSMSData {
             if raw.contains("\u{1A}") || raw.contains("\u{1B}") {
@@ -50,9 +51,18 @@ public final class MockATTransport: ATTransport, @unchecked Sendable {
                 return
             }
         }
-        
+
         try? await Task.sleep(nanoseconds: 80_000_000) // 80ms simulated modem latency
-        
+
+        if let customHandler = onCommand, let customResp = customHandler(trimmed) {
+            for line in customResp.components(separatedBy: "\r\n") {
+                if !line.isEmpty {
+                    incomingHandler?(line)
+                }
+            }
+            return
+        }
+
         if trimmed == "ATE0" || trimmed == "ATE1" || trimmed == "AT" {
             incomingHandler?("OK")
         } else if trimmed == "ATI" {
@@ -137,18 +147,24 @@ public final class MockATTransport: ATTransport, @unchecked Sendable {
         } else if trimmed == "AT+QAUDMOD?" {
             incomingHandler?("+QAUDMOD: 0")
             incomingHandler?("OK")
+        } else if trimmed.hasPrefix("AT+CPBS=") {
+            incomingHandler?("OK")
+        } else if trimmed.hasPrefix("AT+CPBR=") {
+            incomingHandler?("+CPBR: 1,\"10010\",129,\"中国联通客服\"")
+            incomingHandler?("+CPBR: 2,\"10086\",129,\"中国移动客服\"")
+            incomingHandler?("OK")
         } else {
             incomingHandler?("OK")
         }
     }
-    
+
     // MARK: - Simulation Triggers
-    
+
     public func simulateIncomingCall(number: String) {
         incomingHandler?("RING")
         incomingHandler?("+CLIP: \"\(number)\",129,,,,0")
     }
-    
+
     public func simulateIncomingSMS(storage: String = "ME", index: Int = 3) {
         incomingHandler?("+CMTI: \"\(storage)\",\(index)")
     }

@@ -1,183 +1,148 @@
 import SwiftUI
+import AppKit
 import EC20Core
 import EC20Transport
 
-@MainActor
-final class AudioBridgeStore: ObservableObject {
-    let real = EC20AudioBridge()
-    let mock = EC20AudioBridge()
+fileprivate final class WindowObservingView: NSView {
+    var callback: ((NSWindow) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window = self.window {
+            callback?(window)
+        }
+    }
 }
 
-public enum NavigationSection: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard"
-    case sms = "Messages"
-    case calls = "Phone & Calls"
-    case voiceBridge = "Voice Audio Bridge"
-    case console = "AT Console"
-    
-    public var id: String { rawValue }
-    
-    public var icon: String {
-        switch self {
-        case .dashboard: return "gauge.medium"
-        case .sms: return "message.fill"
-        case .calls: return "phone.fill"
-        case .voiceBridge: return "waveform.and.mic"
-        case .console: return "terminal.fill"
+fileprivate struct WindowAccessor: NSViewRepresentable {
+    let callback: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> WindowObservingView {
+        let view = WindowObservingView()
+        view.callback = callback
+        if let window = view.window {
+            callback(window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowObservingView, context: Context) {
+        nsView.callback = callback
+        if let window = nsView.window {
+            callback(window)
         }
     }
 }
 
 @MainActor
 public struct ContentView: View {
-    @StateObject private var realController: EC20Controller
-    @StateObject private var mockController: EC20Controller
-    @StateObject private var uiState = AppUIState()
-    
-    @StateObject private var audioStore = AudioBridgeStore()
-    
-    public init() {
-        let realTransport = LibusbATTransport()
-        let mockTransport = MockATTransport()
-        _realController = StateObject(wrappedValue: EC20Controller(transport: realTransport))
-        _mockController = StateObject(wrappedValue: EC20Controller(transport: mockTransport))
-    }
-    
+    @ObservedObject private var coordinator = AppCoordinator.shared
+    @ObservedObject private var realController = AppCoordinator.shared.realController
+    @ObservedObject private var mockController = AppCoordinator.shared.mockController
+    @ObservedObject private var uiState = AppCoordinator.shared.uiState
+
+    public init() {}
+
     private var activeController: EC20Controller {
-        uiState.useSimulation ? mockController : realController
+        coordinator.activeController
     }
-    
+
     private var activeAudioBridge: EC20AudioBridge {
-        uiState.useSimulation ? audioStore.mock : audioStore.real
+        coordinator.activeAudioBridge
     }
-    
+
     public var body: some View {
         NavigationSplitView {
-            List(NavigationSection.allCases, selection: $uiState.selectedSection) { section in
-                NavigationLink(value: section) {
-                    Label(section.rawValue, systemImage: section.icon)
+            List(AppTab.allCases, selection: $uiState.selectedTab) { tab in
+                NavigationLink(value: tab) {
+                    HStack {
+                        Label(tab.rawValue, systemImage: tab.icon)
+                        Spacer()
+                        if tab == .messages && activeController.totalUnreadCount > 0 {
+                            Text("\(activeController.totalUnreadCount)")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.red)
+                                .foregroundColor(.white)
+                                .clipShape(Capsule())
+                        }
+                    }
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
-            
-            // Transport switch at bottom of sidebar
-            VStack(alignment: .leading, spacing: 10) {
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 230)
+
+            // Simulation indicator at bottom of sidebar
+            VStack(alignment: .leading, spacing: 6) {
                 Divider()
-                Toggle(isOn: $uiState.useSimulation) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Simulation Mode")
-                            .font(.subheadline.bold())
-                        Text(uiState.useSimulation ? "Using Mock Modem" : "Using Real EC20 USB")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(uiState.useSimulation ? Color.purple : Color.green)
+                        .frame(width: 8, height: 8)
+                    Text(uiState.useSimulation ? "仿真模拟模式" : "真实 EC20 硬件")
+                        .font(.caption2.bold())
+                        .foregroundColor(.secondary)
                 }
-                .toggleStyle(.switch)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
             }
         } detail: {
             VStack(spacing: 0) {
-                // Top status and connection bar
+                // Top Global Status Bar
                 topStatusBar
                 Divider()
-                
+
                 // Active Section View
                 Group {
-                    switch uiState.selectedSection {
-                    case .dashboard:
-                        StatusDashboardView(controller: activeController)
-                    case .sms:
-                        SMSInboxView(controller: activeController, uiState: uiState)
-                    case .calls:
-                        CallControlView(controller: activeController, uiState: uiState)
-                    case .voiceBridge:
-                        VoiceBridgeView(controller: activeController, audioBridge: activeAudioBridge)
-                    case .console:
-                        ATConsoleView(controller: activeController, uiState: uiState)
+                    switch uiState.selectedTab {
+                    case .phone:
+                        PhoneView(controller: activeController, uiState: uiState)
+                    case .messages:
+                        MessagesView(controller: activeController, uiState: uiState)
+                    case .contacts:
+                        ContactsView(controller: activeController, uiState: uiState)
+                    case .cellular:
+                        CellularDataView(controller: activeController)
+                    case .settings:
+                        SettingsAdvancedView(controller: activeController, uiState: uiState, audioBridge: activeAudioBridge)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task {
-            setupAudioBridgeHooks()
-            await activeController.connect()
-        }
-        .onChange(of: uiState.useSimulation) { _ in
-            Task {
-                if uiState.useSimulation {
-                    await realController.disconnect()
-                } else {
-                    await mockController.disconnect()
-                }
-                await activeController.connect()
-            }
-        }
+        .background(WindowAccessor { window in
+            coordinator.registerMainWindow(window)
+            window.delegate = MainWindowDelegate.shared
+        })
     }
-    
-    private func setupAudioBridgeHooks() {
-        // Real modem audio bridge hooks
-        let realAudioBridge = audioStore.real
-        let mockAudioBridge = audioStore.mock
-        realController.onCallStarted = { [weak realController, weak realAudioBridge] in
-            guard let realController = realController, let realAudioBridge = realAudioBridge else { return }
-            guard realAudioBridge.state == .stopped, realController.audioAssessment.qpcmvSupported else { return }
-            guard let response = try? await realController.executeAT("AT+QPCMV=1,0"), response.isOK else {
-                realController.setAudioBridgeStatus("QPCMV activation failed")
-                return
-            }
-            realAudioBridge.start(deviceHandle: realController.transport.rawDeviceHandle, loopbackOnly: false)
-            realController.setAudioBridgeStatus(realAudioBridge.state.rawValue)
-        }
-        realController.onCallEnded = { [weak realController, weak realAudioBridge] in
-            guard let realController = realController, let realAudioBridge = realAudioBridge else { return }
-            realAudioBridge.stop()
-            _ = try? await realController.executeAT("AT+QPCMV=0")
-            realController.setAudioBridgeStatus(realAudioBridge.state.rawValue)
-        }
-        
-        // Mock audio bridge hooks (loopback test)
-        mockController.onCallStarted = { [weak mockController, weak mockAudioBridge] in
-            guard let mockController = mockController, let mockAudioBridge = mockAudioBridge else { return }
-            mockAudioBridge.start(deviceHandle: nil, loopbackOnly: true)
-            mockController.setAudioBridgeStatus(mockAudioBridge.state.rawValue)
-        }
-        mockController.onCallEnded = { [weak mockController, weak mockAudioBridge] in
-            guard let mockController = mockController, let mockAudioBridge = mockAudioBridge else { return }
-            mockAudioBridge.stop()
-            mockController.setAudioBridgeStatus(mockAudioBridge.state.rawValue)
-        }
-    }
-    
+
     // MARK: - Top Status Bar
-    
+
     private var topStatusBar: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             // Connection Indicator
             HStack(spacing: 6) {
                 Circle()
                     .fill(statusColor)
-                    .frame(width: 10, height: 10)
+                    .frame(width: 9, height: 9)
                 Text(statusText)
                     .font(.caption.bold())
             }
-            
-            Divider()
-                .frame(height: 16)
-            
+
+            Divider().frame(height: 14)
+
             // Operator & Signal
             HStack(spacing: 6) {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .foregroundColor(.accentColor)
-                Text(activeController.simInfo.operatorName ?? "No Operator")
+                Text(activeController.simInfo.operatorName ?? "搜索网络中...")
                     .font(.caption.bold())
                 Text("(\(activeController.simInfo.signal.summary))")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
-            
+
             // SIM Pill
             Text("SIM: \(activeController.simInfo.cpinStatus.rawValue)")
                 .font(.caption2.bold())
@@ -186,13 +151,12 @@ public struct ContentView: View {
                 .background(activeController.simInfo.cpinStatus == .ready ? Color.green.opacity(0.15) : Color.red.opacity(0.15))
                 .foregroundColor(activeController.simInfo.cpinStatus == .ready ? .green : .red)
                 .cornerRadius(4)
-            
-            // Audio Bridge Pill
-            if activeAudioBridge.state != .stopped {
+
+            // Cellular Data Pill
+            if activeController.cellularStatus.isConnected {
                 HStack(spacing: 4) {
-                    Image(systemName: "waveform")
-                        .foregroundColor(.green)
-                    Text("Audio Bridge: \(activeAudioBridge.state.rawValue)")
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text("蜂窝: 已连接")
                         .font(.caption2.bold())
                         .foregroundColor(.green)
                 }
@@ -201,10 +165,25 @@ public struct ContentView: View {
                 .background(Color.green.opacity(0.15))
                 .cornerRadius(4)
             }
-            
+
+            // Audio Bridge Pill
+            if activeAudioBridge.state != .stopped {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                        .foregroundColor(.green)
+                    Text("语音桥: \(activeAudioBridge.state.rawValue)")
+                        .font(.caption2.bold())
+                        .foregroundColor(.green)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.15))
+                .cornerRadius(4)
+            }
+
             Spacer()
-            
-            // Connect / Disconnect button
+
+            // Connect / Disconnect Button
             Button(action: {
                 Task {
                     if case .connected = activeController.connectionStatus {
@@ -215,9 +194,9 @@ public struct ContentView: View {
                 }
             }) {
                 if case .connected = activeController.connectionStatus {
-                    Label("Disconnect", systemImage: "bolt.slash")
+                    Label("断开", systemImage: "bolt.slash")
                 } else {
-                    Label("Connect", systemImage: "bolt.fill")
+                    Label("连接", systemImage: "bolt.fill")
                 }
             }
             .buttonStyle(.bordered)
@@ -227,7 +206,7 @@ public struct ContentView: View {
         .padding(.vertical, 8)
         .background(Color(NSColor.windowBackgroundColor))
     }
-    
+
     private var statusColor: Color {
         switch activeController.connectionStatus {
         case .connected: return .green
@@ -236,13 +215,13 @@ public struct ContentView: View {
         case .error: return .red
         }
     }
-    
+
     private var statusText: String {
         switch activeController.connectionStatus {
-        case .connected: return "Connected"
-        case .connecting: return "Connecting..."
-        case .disconnected: return "Disconnected"
-        case .error(let msg): return "Error: \(msg)"
+        case .connected: return "已连接"
+        case .connecting: return "连接中..."
+        case .disconnected: return "已断开"
+        case .error: return "错误"
         }
     }
 }

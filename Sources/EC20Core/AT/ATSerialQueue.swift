@@ -9,10 +9,10 @@ public actor ATSerialQueue {
     private var pendingContinuation: CheckedContinuation<ATResponse, Error>?
     private var accumulatedLines: [String] = []
     private var activeTimeoutTask: Task<Void, Never>?
-    
+
     public nonisolated let urcStream: AsyncStream<(URCEvent, String)>
     private let urcContinuation: AsyncStream<(URCEvent, String)>.Continuation
-    
+
     public init() {
         var cont: AsyncStream<(URCEvent, String)>.Continuation!
         self.urcStream = AsyncStream { c in
@@ -20,12 +20,12 @@ public actor ATSerialQueue {
         }
         self.urcContinuation = cont
     }
-    
+
     /// Called when raw data/line is received from transport
     public func receiveLine(_ line: String) {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        
+
         // Check if line is a URC
         if URCParser.isURC(trimmed) {
             if let event = URCParser.parse(trimmed) {
@@ -36,11 +36,11 @@ public actor ATSerialQueue {
                 return
             }
         }
-        
+
         // If an AT command is in flight, accumulate line
         if pendingContinuation != nil {
             accumulatedLines.append(trimmed)
-            
+
             // Check terminal condition: "OK", "ERROR", "+CME ERROR: ...", "+CMS ERROR: ...", "> "
             if trimmed == "OK" ||
                trimmed == "ERROR" ||
@@ -48,10 +48,10 @@ public actor ATSerialQueue {
                trimmed == "BUSY" ||
                trimmed.hasPrefix("+CME ERROR:") ||
                trimmed.hasPrefix("+CMS ERROR:") {
-                
+
                 activeTimeoutTask?.cancel()
                 activeTimeoutTask = nil
-                
+
                 let response = ATResponse(rawLines: accumulatedLines)
                 let cont = pendingContinuation
                 pendingContinuation = nil
@@ -60,7 +60,7 @@ public actor ATSerialQueue {
             }
         }
     }
-    
+
     /// Handle prompt for SMS PDU or text mode (e.g. "> ")
     public func receivePrompt() {
         if pendingContinuation != nil {
@@ -74,7 +74,7 @@ public actor ATSerialQueue {
             cont?.resume(returning: response)
         }
     }
-    
+
     /// Executes a single AT command, waiting for completion or timeout
     public func execute(
         command: ATCommand,
@@ -85,12 +85,12 @@ public actor ATSerialQueue {
         }
         isBusy = true
         defer { isBusy = false }
-        
+
         accumulatedLines = []
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             self.pendingContinuation = continuation
-            
+
             // Launch timeout task
             self.activeTimeoutTask = Task { [weak self] in
                 do {
@@ -99,7 +99,7 @@ public actor ATSerialQueue {
                     await self?.handleTimeout(for: command)
                 } catch {}
             }
-            
+
             // Send command
             Task { [weak self] in
                 do {
@@ -110,7 +110,7 @@ public actor ATSerialQueue {
             }
         }
     }
-    
+
     private func handleSendError(_ error: Error) {
         activeTimeoutTask?.cancel()
         activeTimeoutTask = nil
@@ -118,7 +118,7 @@ public actor ATSerialQueue {
         pendingContinuation = nil
         cont?.resume(throwing: error)
     }
-    
+
     private func handleTimeout(for command: ATCommand) {
         guard let cont = pendingContinuation else { return }
         pendingContinuation = nil
@@ -128,5 +128,16 @@ public actor ATSerialQueue {
             userInfo: [NSLocalizedDescriptionKey: "AT response timed out after \(command.timeoutSeconds)s"]
         )
         cont.resume(throwing: timeoutError)
+    }
+
+    public func reset(reason: String = "Transport disconnected") {
+        activeTimeoutTask?.cancel()
+        activeTimeoutTask = nil
+        if let cont = pendingContinuation {
+            pendingContinuation = nil
+            cont.resume(throwing: NSError(domain: "EC20SerialQueue", code: -1002, userInfo: [NSLocalizedDescriptionKey: reason]))
+        }
+        accumulatedLines = []
+        isBusy = false
     }
 }

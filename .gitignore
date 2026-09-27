@@ -3,3 +3,13 @@
 *.app/
 *.DS_Store
 DerivedData/
+Assets/EC20Companion.iconset/
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+.env
+.env.*
+*.p12
+*.mobileprovision
+iOS/*.xcodeproj/

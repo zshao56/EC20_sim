@@ -2,26 +2,26 @@ import Foundation
 
 /// 3GPP TS 23.040 and TS 23.038 PDU encoder and decoder for SMS.
 public enum PDUCodec {
-    
-    public struct MultipartInfo: Hashable, Equatable, Sendable {
+
+    public struct MultipartInfo: Hashable, Equatable, Sendable, Codable {
         public let referenceNumber: UInt16
         public let totalParts: Int
         public let currentPart: Int
-        
+
         public init(referenceNumber: UInt16, totalParts: Int, currentPart: Int) {
             self.referenceNumber = referenceNumber
             self.totalParts = totalParts
             self.currentPart = currentPart
         }
     }
-    
+
     public struct DecodedSMS: Equatable, Sendable {
         public let sender: String
         public let timestamp: Date?
         public let text: String
         public let multipartInfo: MultipartInfo?
         public let rawPDU: String
-        
+
         public init(sender: String, timestamp: Date?, text: String, multipartInfo: MultipartInfo?, rawPDU: String) {
             self.sender = sender
             self.timestamp = timestamp
@@ -30,27 +30,27 @@ public enum PDUCodec {
             self.rawPDU = rawPDU
         }
     }
-    
+
     public struct OutgoingPDU: Equatable, Sendable {
         /// PDU length in octets excluding SMSC bytes (value passed to AT+CMGS=<length>)
         public let tpduLength: Int
         /// Full hexadecimal PDU string ending with \x1A
         public let pduHex: String
-        
+
         public init(tpduLength: Int, pduHex: String) {
             self.tpduLength = tpduLength
             self.pduHex = pduHex
         }
     }
-    
+
     // MARK: - Address Encoding & Decoding
-    
+
     /// Decodes semi-octet swapped address
     public static func decodeAddress(bytes: [UInt8], startIndex: Int, digitCount: Int, addressType: UInt8) -> (String, Int) {
         let isInternational = (addressType & 0x70) == 0x10 // 0x91 international
         var number = isInternational ? "+" : ""
         let octetCount = (digitCount + 1) / 2
-        
+
         var digitsParsed = 0
         for i in 0..<octetCount {
             let byteIndex = startIndex + i
@@ -58,7 +58,7 @@ public enum PDUCodec {
             let b = bytes[byteIndex]
             let low = b & 0x0F
             let high = (b >> 4) & 0x0F
-            
+
             if low <= 9 && digitsParsed < digitCount {
                 number.append(String(low))
                 digitsParsed += 1
@@ -68,10 +68,10 @@ public enum PDUCodec {
                 digitsParsed += 1
             }
         }
-        
+
         return (number, octetCount)
     }
-    
+
     /// Encodes destination address into semi-octets
     public static func encodeAddress(_ number: String) -> [UInt8] {
         var cleanNumber = number.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,10 +80,10 @@ public enum PDUCodec {
             addressType = 0x91 // International
             cleanNumber.removeFirst()
         }
-        
+
         let digits = cleanNumber.filter { $0.isNumber }
         let digitCount = UInt8(digits.count)
-        
+
         var octets: [UInt8] = [digitCount, addressType]
         let chars = Array(digits)
         var i = 0
@@ -94,12 +94,12 @@ public enum PDUCodec {
             octets.append(byte)
             i += 2
         }
-        
+
         return octets
     }
-    
+
     // MARK: - Timestamp Decoding
-    
+
     public static func decodeTimestamp(bytes: [UInt8], startIndex: Int) -> Date? {
         guard startIndex + 7 <= bytes.count else { return nil }
         func swapNibbles(_ b: UInt8) -> Int {
@@ -113,7 +113,7 @@ public enum PDUCodec {
         let hour = swapNibbles(bytes[startIndex + 3])
         let minute = swapNibbles(bytes[startIndex + 4])
         let second = swapNibbles(bytes[startIndex + 5])
-        
+
         var dateComponents = DateComponents()
         dateComponents.year = year
         dateComponents.month = month
@@ -122,31 +122,31 @@ public enum PDUCodec {
         dateComponents.minute = minute
         dateComponents.second = second
         dateComponents.timeZone = TimeZone(secondsFromGMT: 8 * 3600) // Default GMT+8
-        
+
         return Calendar(identifier: .gregorian).date(from: dateComponents)
     }
-    
+
     // MARK: - PDU Parser (SMS-DELIVER)
-    
+
     public static func decodeDeliverPDU(_ hexString: String) -> DecodedSMS? {
         guard let bytes = hexToBytes(hexString) else { return nil }
         guard !bytes.isEmpty else { return nil }
-        
+
         var index = 0
-        
+
         // 1. SCA (Service Center Address) length in octets
         let scaLength = Int(bytes[index])
         index += 1
         index += scaLength // skip SMSC info
-        
+
         guard index < bytes.count else { return nil }
-        
+
         // 2. First octet of SMS-DELIVER
         let firstOctet = bytes[index]
         index += 1
-        
+
         let hasUDH = (firstOctet & 0x40) != 0 // TP-UDHI bit 6
-        
+
         // 3. Originating Address (OA)
         guard index < bytes.count else { return nil }
         let oaDigitCount = Int(bytes[index])
@@ -154,37 +154,37 @@ public enum PDUCodec {
         guard index < bytes.count else { return nil }
         let oaType = bytes[index]
         index += 1
-        
+
         let (senderNumber, oaOctetLen) = decodeAddress(bytes: bytes, startIndex: index, digitCount: oaDigitCount, addressType: oaType)
         index += oaOctetLen
-        
+
         // 4. TP-PID
         guard index < bytes.count else { return nil }
         _ = bytes[index]
         index += 1
-        
+
         // 5. TP-DCS (Data Coding Scheme)
         guard index < bytes.count else { return nil }
         let dcs = bytes[index]
         index += 1
-        
+
         // 6. TP-SCTS (Timestamp, 7 octets)
         let timestamp = decodeTimestamp(bytes: bytes, startIndex: index)
         index += 7
-        
+
         // 7. TP-UDL (User Data Length)
         guard index < bytes.count else { return nil }
         let udl = Int(bytes[index])
         index += 1
-        
+
         guard index <= bytes.count else { return nil }
         let userDataBytes = Array(bytes[index...])
-        
+
         // Parse UDH if present
         var multipart: MultipartInfo? = nil
         var bodyBytes = userDataBytes
         var udhLength = 0
-        
+
         if hasUDH && !userDataBytes.isEmpty {
             udhLength = Int(userDataBytes[0])
             guard userDataBytes.count >= udhLength + 1 else { return nil }
@@ -213,12 +213,12 @@ public enum PDUCodec {
                 bodyBytes = Array(userDataBytes[(udhLength + 1)...])
             }
         }
-        
+
         // Decode message text according to DCS
         var text = ""
         let isUCS2 = (dcs & 0x0C) == 0x08 // DCS bits 3..2 == 10 => UCS2
         let is8Bit = (dcs & 0x0C) == 0x04
-        
+
         if isUCS2 {
             // UCS2: bodyBytes is pairs of UTF-16BE bytes
             var utf16Units: [UInt16] = []
@@ -235,7 +235,7 @@ public enum PDUCodec {
             // GSM 7-bit unpacked
             text = unpack7BitGSM(bytes: userDataBytes, udl: udl, hasUDH: hasUDH, udhLength: udhLength)
         }
-        
+
         return DecodedSMS(
             sender: senderNumber,
             timestamp: timestamp,
@@ -244,19 +244,19 @@ public enum PDUCodec {
             rawPDU: hexString
         )
     }
-    
+
     // MARK: - 7-bit GSM Unpacking
-    
+
     public static func unpack7BitGSM(bytes: [UInt8], udl: Int, hasUDH: Bool, udhLength: Int) -> String {
         var septets: [UInt8] = []
-        
+
         if hasUDH {
             // UDH takes (udhLength + 1) * 8 bits. We need to skip this and any fill bits to reach septet boundary.
             let udhBits = (udhLength + 1) * 8
             let fillBits = (7 - (udhBits % 7)) % 7
             let totalSkipBits = udhBits + fillBits
             let septetsInUDH = totalSkipBits / 7
-            
+
             // Unpack all septets from bytes
             let allSeptets = unpackAllSeptets(from: bytes, count: udl)
             if allSeptets.count > septetsInUDH {
@@ -265,7 +265,7 @@ public enum PDUCodec {
         } else {
             septets = unpackAllSeptets(from: bytes, count: udl)
         }
-        
+
         // Map 7-bit GSM to Swift String
         var result = ""
         for s in septets {
@@ -276,17 +276,17 @@ public enum PDUCodec {
         }
         return result
     }
-    
+
     private static func unpackAllSeptets(from bytes: [UInt8], count: Int) -> [UInt8] {
         var septets: [UInt8] = []
         var shift = 0
         var carry: UInt8 = 0
-        
+
         for byte in bytes {
             let septet = ((byte << shift) | carry) & 0x7F
             septets.append(septet)
             if septets.count >= count { break }
-            
+
             carry = byte >> (7 - shift)
             shift += 1
             if shift == 7 {
@@ -298,17 +298,17 @@ public enum PDUCodec {
         }
         return septets
     }
-    
+
     // MARK: - PDU Encoder (SMS-SUBMIT)
-    
+
     /// Encodes an SMS message into one or more SMS-SUBMIT PDUs (supporting long/multipart SMS)
     public static func encodeSubmitPDUs(destination: String, text: String, referenceNumber: UInt16 = 0x42) -> [OutgoingPDU] {
         let isUCS2 = UCS2Codec.requiresUCS2(text)
         let maxSingleChars = isUCS2 ? 70 : 160
         let maxMultipartChars = isUCS2 ? 67 : 153
-        
+
         let destAddressBytes = encodeAddress(destination)
-        
+
         if text.count <= maxSingleChars {
             // Single PDU
             let pdu = buildSingleSubmitPDU(destAddressBytes: destAddressBytes, text: text, isUCS2: isUCS2)
@@ -324,29 +324,29 @@ public enum PDUCodec {
             )
         }
     }
-    
+
     private static func buildSingleSubmitPDU(destAddressBytes: [UInt8], text: String, isUCS2: Bool) -> OutgoingPDU {
         var tpdu: [UInt8] = []
-        
+
         // 1. First octet: TP-MTI = 01 (SMS-SUBMIT), TP-VPF = 10 (Validity Period present, relative)
         tpdu.append(0x11)
-        
+
         // 2. TP-MR (Message Reference) = 00
         tpdu.append(0x00)
-        
+
         // 3. TP-DA (Destination Address)
         tpdu.append(contentsOf: destAddressBytes)
-        
+
         // 4. TP-PID (Protocol Identifier) = 00
         tpdu.append(0x00)
-        
+
         // 5. TP-DCS (Data Coding Scheme): 0x08 for UCS2, 0x00 for GSM 7-bit
         let dcs: UInt8 = isUCS2 ? 0x08 : 0x00
         tpdu.append(dcs)
-        
+
         // 6. TP-VP (Validity Period): 0xAA (approx 4 days)
         tpdu.append(0xAA)
-        
+
         // 7. TP-UDL & TP-UD
         if isUCS2 {
             var ucs2Bytes: [UInt8] = []
@@ -361,12 +361,12 @@ public enum PDUCodec {
             tpdu.append(UInt8(septetCount)) // UDL in septets for GSM 7-bit
             tpdu.append(contentsOf: packedBytes)
         }
-        
+
         let tpduLength = tpdu.count
         let fullPDUHex = "00" + bytesToHex(tpdu) // 00 = SMSC length 0 (use default from SIM)
         return OutgoingPDU(tpduLength: tpduLength, pduHex: fullPDUHex)
     }
-    
+
     private static func buildMultipartSubmitPDUs(
         destAddressBytes: [UInt8],
         text: String,
@@ -377,12 +377,12 @@ public enum PDUCodec {
         let chars = Array(text)
         let totalParts = (chars.count + maxCharsPerPart - 1) / maxCharsPerPart
         var pdus: [OutgoingPDU] = []
-        
+
         for partIndex in 0..<totalParts {
             let start = partIndex * maxCharsPerPart
             let end = min(start + maxCharsPerPart, chars.count)
             let partText = String(chars[start..<end])
-            
+
             var tpdu: [UInt8] = []
             // First octet: TP-MTI = 01 (SMS-SUBMIT), TP-UDHI = 0x40 (has UDH), TP-VPF = 0x10
             tpdu.append(0x51)
@@ -391,7 +391,7 @@ public enum PDUCodec {
             tpdu.append(0x00) // TP-PID
             tpdu.append(isUCS2 ? 0x08 : 0x00) // TP-DCS
             tpdu.append(0xAA) // TP-VP
-            
+
             // UDH for concatenated SMS (IEI 0x00: 8-bit ref or 0x08: 16-bit ref)
             let udh: [UInt8] = [
                 0x05, // UDH Length: 5 bytes
@@ -401,7 +401,7 @@ public enum PDUCodec {
                 UInt8(totalParts),
                 UInt8(partIndex + 1)
             ]
-            
+
             if isUCS2 {
                 var ucs2Bytes: [UInt8] = []
                 for unit in partText.utf16 {
@@ -418,29 +418,29 @@ public enum PDUCodec {
                 let fillBits = (7 - (udhBits % 7)) % 7
                 let totalSeptetsInUDH = (udhBits + fillBits) / 7
                 let (packedBody, septetCount) = pack7BitWithPrecedingBits(partText, fillBits: fillBits)
-                
+
                 let totalUDL = totalSeptetsInUDH + septetCount
                 tpdu.append(UInt8(totalUDL))
                 tpdu.append(contentsOf: udh)
                 tpdu.append(contentsOf: packedBody)
             }
-            
+
             let tpduLength = tpdu.count
             let fullPDUHex = "00" + bytesToHex(tpdu)
             pdus.append(OutgoingPDU(tpduLength: tpduLength, pduHex: fullPDUHex))
         }
-        
+
         return pdus
     }
-    
+
     // MARK: - 7-bit GSM Packing
-    
+
     public static func pack7Bit(_ text: String) -> ([UInt8], Int) {
         let septets: [UInt8] = text.unicodeScalars.map { UInt8($0.value & 0x7F) }
         var octets: [UInt8] = []
         var shift = 0
         var current: UInt8 = 0
-        
+
         for septet in septets {
             if shift == 0 {
                 current = septet
@@ -460,13 +460,13 @@ public enum PDUCodec {
         }
         return (octets, septets.count)
     }
-    
+
     private static func pack7BitWithPrecedingBits(_ text: String, fillBits: Int) -> ([UInt8], Int) {
         let septets: [UInt8] = text.unicodeScalars.map { UInt8($0.value & 0x7F) }
         var octets: [UInt8] = []
         var shift = fillBits
         var current: UInt8 = 0
-        
+
         for septet in septets {
             current |= (septet << shift)
             if shift + 7 >= 8 {
@@ -482,9 +482,9 @@ public enum PDUCodec {
         }
         return (octets, septets.count)
     }
-    
+
     // MARK: - Hex Helpers
-    
+
     public static func hexToBytes(_ hex: String) -> [UInt8]? {
         let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleaned.count % 2 == 0 else { return nil }
@@ -498,7 +498,7 @@ public enum PDUCodec {
         }
         return bytes
     }
-    
+
     public static func bytesToHex(_ bytes: [UInt8]) -> String {
         return bytes.map { String(format: "%02X", $0) }.joined()
     }
